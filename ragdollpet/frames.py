@@ -8,13 +8,10 @@ import time
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt
 from PyQt5.QtGui import QBitmap, QImage, QPainter, QPixmap, QRegion, QTransform
 
+from frame_geometry import CANVAS, CONTENT_H, GROUND
+
 from .assets import resource_path
 from .config import BASE_H, MASK_INFLATE, TOP_MARGIN, app_dir
-
-# 标准帧尺寸: 所有素材都对齐到这个基准, 换图时不会忽大忽小 / 上下跳
-CANVAS = 600
-CONTENT_H = 482
-GROUND = 549
 
 
 class FrameMixin:

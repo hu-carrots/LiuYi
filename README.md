@@ -85,22 +85,54 @@ python "D:\Download\六一桌宠\desktop_pet_v2.1.py"   # 这是启动器, 代�
 
 图片都放在 **`image\`** 子目录里。查找顺序是 **`image\` → 脚本同目录 → `assets\` → 当前工作目录**；`image\` 排第一，是为了避免你把原图丢在程序目录根下时把正式素材顶掉（2026-10-25 踩过这个坑）。
 
-**素材要求**：600×600 或更大（≥2048 会在加载时自动降采样）、RGBA 透明底、白底也行（但要保证背景是纯白）、**脚底基线和 idle 一致**。
+**素材要求**：建议 600×600、RGBA 透明底、**脚底基线和 idle 一致**。白底图需先用下面的导入工具处理，直接放入会显示白方块。
 
 ### 补帧导入（一条命令）
 
-拿到任何来源的走位图（白底或透明底都行），丢进一个文件夹，跑：
+在仓库根目录运行。导入工具只依赖 **Python 3.9+ 和 Pillow**，不需要 PyQt5、显示器或 AI 抠图服务；运行桌宠另需 `python -m pip install PyQt5`。
 
 ```powershell
-python import_frames.py D:\Download\新帧\            # 处理整个文件夹
-python import_frames.py a.png b.png c.png            # 或指定图片
-# 常用参数
-#   --out D:\Download     输出目录
-#   --fit per-frame       多张单独生成、大小不一时用（默认 uniform 适合同一张图切出来的）
-#   --no-cut              已经是透明底, 跳过抠底
+python -m pip install -r requirements-import.txt
+python import_frames.py --out walk_test --fit per-frame
 ```
 
-它会自动做：抠白底（只删和边界连通的白色，保护肚子里的白毛）→ 切掉地面阴影 → 统一缩放 → 水平居中 → 脚底对齐 → 编号存成 `cat_walk_1..N.png`，最后输出一张深色底预览条给你验收。
+不提供输入时，默认读取脚本旁 `source/cat_walk_*_src.jpg`（仓库已提供 4 张原图），生成 `walk_test/cat_walk_1.png` 至 `cat_walk_4.png` 和深色底 `walk_preview.png`。检查预览后，可写入桌宠素材目录并重启：
+
+```powershell
+python import_frames.py --fit per-frame --overwrite
+```
+
+`python import_frames.py` 本身也可运行，但默认输出 `image/` 已有帧时会拒绝覆盖并提示；需显式选择新输出目录或加 `--overwrite`。
+
+也可导入自己的单帧素材（白底或透明底）：
+
+```powershell
+python import_frames.py "D:\Download\新帧" --out walk_test
+python import_frames.py a.png b.png c.png --fit per-frame --out walk_test
+python import_frames.py image/cat_walk_1.png image/cat_walk_2.png --no-cut --out walk_test
+python import_frames.py --help
+```
+
+| 参数 | 默认 / 实际行为 |
+|---|---|
+| 输入图片 / 文件夹 | 可混用；文件夹仅扫描当前层 PNG/JPG/JPEG/WebP/BMP，按自然编号排序（2 在 10 前）；显式文件按命令行顺序，重复路径去重。每张图须是一个姿态，不切分拼图；合计 1–8 张，与桌宠加载上限一致 |
+| `--out DIR` | 默认脚本旁 `image/`；相对路径相对于当前工作目录 |
+| `--fit uniform` | 默认。所有帧用同一缩放比例，保留原始相对大小；适合同一套尺寸的素材 |
+| `--fit per-frame` | 每帧分别适配，尽可能统一内容高度；适合独立生成、取景大小不同的图片 |
+| `--no-cut` | 保留原有 alpha，跳过白底与阴影处理；用于已抠好的透明图，不会把白底自动变透明 |
+| `--white-threshold 240` | 0–255，RGB 三通道均达到该值时视为白底候选；降低会移除更多浅色背景 |
+| `--shadow-threshold 210` | 0–255，图像下半部的浅灰候选（最大/最小通道差 ≤12）；0 禁用此阴影规则 |
+| `--overwrite` | 允许替换输出，成功导入后删除同目录中超出本次帧数的旧 `cat_walk_1..8.png`，避免短序列混入旧帧；禁止原地覆盖输入。不会改动 idle 或其他动作素材 |
+
+处理流程：保留原有透明度 → 仅去除与画布边界连通的白色 / 下半部浅灰候选 → 按 alpha 裁内容边界 → 保持宽高比缩放 → 水平居中 → 脚底对齐 → 编号保存并生成预览。输出与运行时共用 `frame_geometry.py` 标准：**600×600、最大内容高 482、内容下边界 549（最后可见行 y=548）、水平中心 300**。宽尾巴会优先缩小以完整放入画布，因此内容高度可能小于 482；`uniform` 下较矮姿态也会保留高度差。
+
+**处理限制**：这是浅色背景的连通区域阈值处理，不是通用主体分割。封闭在轮廓内的白毛会保留；与背景连通的白毛、浅色轮廓仍可能被删。浅灰地面阴影只有满足上述规则且连到边界时才会去除，深色或与主体粘连的阴影需手工抠图后用 `--no-cut`。基线按可见内容底部对齐，无法识别爪子；请检查预览中的绿线和轮廓。原图保留在输入目录，仓库自带 PNG 不会被静默替换。
+
+验证导入工具（无需 PyQt5）：
+
+```powershell
+python -m unittest discover -s tests -v
+```
 
 
 ### 目录结构（v2.2 起拆模块）
@@ -108,6 +140,9 @@ python import_frames.py a.png b.png c.png            # 或指定图片
 ```
 六一桌宠\
 ├── desktop_pet_v2.1.py   启动器（双击它）
+├── import_frames.py     离线补帧导入（Pillow）
+├── frame_geometry.py    导入与运行时共用尺寸 / 基线
+├── requirements-import.txt  导入工具依赖
 ├── ragdollpet\            代码
 │   ├── config.py         常量 / 台词 / 路径 / 配置(pet.json) / 空闲检测
 │   ├── assets.py         素材查找
@@ -167,7 +202,7 @@ pyinstaller --noconsole --onefile --name RagdollPet ^
 | 现象 | 原因 / 处理 |
 |---|---|
 | 启动只剩简笔画 | 图片没找到：确认 PNG 和脚本/exe 同目录，或放 `assets/` |
-| 猫被裁掉一块 | 图片底部留白太大，跑 `normalize_new_frames.py` 对齐基线 |
+| 猫被裁掉一块 | 先用 `import_frames.py` 导入到新目录检查预览；透明图加 `--no-cut`，宽图会自动缩小避免裁切 |
 | 点不到猫 | 窗口 mask 建立失败会退化成整窗可点（不影响显示），重启一次即可 |
 | 位置跑偏/半透明卡住 | 右键 → 重置窗口位置与透明效果 |
 | 启动没反应 | 已经在跑了，看任务管理器；或者第二次启动会把它叫到前面 |
@@ -261,6 +296,8 @@ pyinstaller --noconsole --onefile --name RagdollPet ^
 
 ## 自测脚本
 
+以下是历史开发记录：除 `import_frames.py` 外，下列专项脚本未随当前仓库提供。当前可直接运行的导入测试见上文。
+
 ```powershell
 python regress_v21.py      # 13 项回归（动画开关/睡眠/唤醒/缓存/位置校正）
 python walkcheck_v21.py    # 步态帧: 帧名/朝向/mask/基线 + 出图
@@ -269,7 +306,7 @@ python soak_v21.py         # 10 秒真实事件循环
 python selftest_v21.py     # 真实 main() 4 秒 + 单实例
 python realscreen_v21.py   # 真窗口 + Win32 API 验证（会显示窗口几秒）
 python realwalk_v21.py     # 真机走一段并连拍（窗口显示约 3 秒）
-python normalize_frames.py # 把新补的帧对齐到 idle 的基线（换帧时再跑）
+python import_frames.py --out walk_test --fit per-frame # 当前可用的导入 / 基线对齐工具
 ```
 
 ## 还没解决的

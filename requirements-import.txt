@@ -1,0 +1,2 @@
+# Offline frame import only; the desktop application separately requires PyQt5.
+Pillow>=9.1
