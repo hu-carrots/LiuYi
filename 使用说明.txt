@@ -92,7 +92,7 @@ ragdollpet\          源码模块（开发者用）
   cat_click.png   炸毛（可选）
   cat_hold.png    被拎起（拖动时用，可选）
   cat_eat.png / cat_eat2.png   吃东西两帧（张嘴 / 闭嘴，可选）
-  cat_walk_1.png … cat_walk_4.png   走路的循环帧（可选）
+  cat_walk_1.png … cat_walk_8.png   走路的循环帧（1–8 张，可选）
   tray_icon.png   托盘图标（可选）
 
 缺哪张都不会崩，会退回上一级表现（例如没有 cat_blink 就整体压扁当眨眼）。
@@ -102,6 +102,27 @@ ragdollpet\          源码模块（开发者用）
   * 建议 600×600 或更大；
   * 脚底大致对齐同一条水平线，否则换帧时会"上下跳"。
   如果尺寸不标准但带透明通道，程序会自动缩放对齐；白底 JPEG 会提示你处理。
+
+
+开发者补帧导入（需下载源码，exe 不包含此工具）：
+  在仓库根目录安装 Python 3.9+ 和 Pillow：
+    python -m pip install -r requirements-import.txt
+  用仓库 source/ 的 4 张走路原图试跑：
+    python import_frames.py --out walk_test --fit per-frame
+  检查 walk_test/walk_preview.png；确认后导入 image/，重启桌宠：
+    python import_frames.py --fit per-frame --overwrite
+  自定义素材：
+    python import_frames.py "新帧文件夹" --out walk_test --fit per-frame
+  已透明的图可加 --no-cut。文件夹只扫描当前层，按自然编号排序；
+  支持 PNG/JPG/JPEG/WebP/BMP，共 1–8 张，每张一个姿态，不切拼图。
+  默认 --fit uniform 保留相对大小；per-frame 分别适配内容高度。
+  --out 默认脚本旁 image/；已有帧会拒绝覆盖，需另选目录或加 --overwrite。
+  --overwrite 会清理超出本次帧数的旧编号帧，禁止覆盖输入原图。
+  输出为 600×600 透明 PNG，最大内容高 482，内容下边界 549，水平居中。
+  白底 / 下半部浅灰阴影仅按边界连通阈值去除，不保证所有阴影都能去掉；
+  可调 --white-threshold（默认240）、--shadow-threshold（默认210，0禁用）。
+  复杂背景、粘连阴影需手工处理后用 --no-cut；请始终检查预览。
+  工具不依赖 PyQt5；运行桌宠仍需 PyQt5。更多参数见 python import_frames.py --help。
 
 
 八、常见问题
