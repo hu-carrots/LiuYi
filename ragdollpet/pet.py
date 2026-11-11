@@ -24,6 +24,8 @@
    cat_pet.png        眯眼被摸   → 单击(可选, 缺了退回炸毛跳)
    cat_walk_1..8.png  步态循环   → 走动(可选, 缺了退回 idle)
    cat_walk_a/b/c.png 旧命名, 仅在没有编号帧时兜底
+   cat_idle_breath_1/2.png 待机呼吸(吸气/呼气, 可选, 缺了退回单张待机 + 程序化呼吸)
+   cat_sleep_breath_1/2.png 睡觉呼吸(吸气/呼气, 可选, 缺了退回单张睡觉 + 程序化呼吸)
  找不到图时用 QPainter 简笔画兜底, 不崩。
 --------------------------------------------------------------------------------
  v2.2 改动:
@@ -70,9 +72,10 @@ from .assets import resource_path
 from .bubble import SpeechBubble
 from .config import (
     ACTION_MS, BASE_H, BLINK_RATIO, BUBBLE_GAP, DOUBLE_CLICK_SEC, FRAME_MS,
-    IMG_BLINK, IMG_CLICK, IMG_IDLE, IMG_PET, IMG_SLEEP, IMG_STRETCH, IMG_WALK_LEGACY,
+    IMG_BLINK, IMG_CLICK, IMG_IDLE, IMG_IDLE_BREATH, IMG_PET, IMG_SLEEP,
+    IMG_SLEEP_BREATH, IMG_STRETCH, IMG_WALK_LEGACY,
     IMG_WALK_SEQ, IMG_YAWN, INSTANCE_TITLE,
-    EAT_MS, IMG_EAT, IMG_HOLD, JUMP_HEIGHT, LINES_ANGRY, LINES_BACK, LINES_CLICK,
+    BREATH_MS, EAT_MS, IMG_EAT, IMG_HOLD, JUMP_HEIGHT, LINES_ANGRY, LINES_BACK, LINES_CLICK,
     LINES_COMFORT, LINES_DRAG, LINES_FEED, LINES_IDLE, LINES_LAUNCH, LINES_PRAISE,
     LINES_SLEEP, LINES_STRETCH, LINES_TEASE, LINES_YAWN, LOGIC_MS, MASK_INFLATE,
     PET_MS, PET_NAME, SCALE_MAX, SCALE_MIN, TOP_MARGIN, Store, app_dir,
@@ -82,8 +85,9 @@ from .frames import FrameMixin
 from .phase1 import (
     LAYERS, MODES, SIZE_PRESETS, WAKE_STRETCH_CHANCE, AppUsageTracker, DailyStats,
     DndQueue, category_enabled, clamp_opacity, default_reminders, due_reminders,
-    format_weather_line, next_idle_interval, parse_reminder, pick_idle_action,
-    should_trigger_idle_action, snap_position,
+    format_weather_line, next_breath_index, next_idle_interval, parse_reminder,
+    pick_idle_action, should_advance_breath, should_trigger_idle_action,
+    snap_position,
 )
 from . import platform_win
 from .weather import WeatherError, fetch_weather
@@ -249,6 +253,9 @@ class DesktopPet(FrameMixin, QWidget):
         # ---------- 新动作动画(伸懒腰/打哈欠, 各两帧循环, 共用一个定时器) ----------
         self._action_timer = QTimer(self, timeout=self._on_action_tick)
 
+        # ---------- 呼吸帧动画(待机/睡觉, 基础帧 + 吸气 + 呼气, 每帧约 1.2 秒) ----------
+        self._breath_timer = QTimer(self, timeout=self._on_breath_tick)
+
         # ---------- 资源 ----------
         self.pix_idle = self._load_image(IMG_IDLE)
         self.pix_sleep = self._load_image(IMG_SLEEP)
@@ -290,6 +297,13 @@ class DesktopPet(FrameMixin, QWidget):
         self._action_index = 0
         self._action_left = 0
         self._last_action_at = time.monotonic()   # 上次新动作开始时间(待机随机触发的节流用)
+        # 呼吸帧(可选): 待机/睡觉各两帧(吸气/呼气); 图缺了池子里只剩基础帧, 不循环也不崩
+        self.pix_idle_breath = [pm for pm in (self._load_image(n) for n in IMG_IDLE_BREATH)
+                                if pm is not None and not pm.isNull()]
+        self.pix_idle_breath_l = [p for p in (self._flipped(pm) for pm in self.pix_idle_breath) if p]
+        self.pix_sleep_breath = [pm for pm in (self._load_image(n) for n in IMG_SLEEP_BREATH)
+                                 if pm is not None and not pm.isNull()]
+        self._breath_index = 0        # 呼吸循环下标: 0 基础帧, 1 吸气, 2 呼气
         self._pending_sleep = False    # 睡前打哈欠进行中: 哈欠完再真正进 sleep
         self._petting = False
         self._last_click_at = 0.0
@@ -310,6 +324,7 @@ class DesktopPet(FrameMixin, QWidget):
         self._walk_timer = QTimer(self, timeout=self._on_walk_tick)
         self._logic_timer = QTimer(self, timeout=self._on_logic)
         self._logic_timer.start(LOGIC_MS)
+        self._breath_timer.start(BREATH_MS)      # 一直转, 推进与否由 _on_breath_tick 守卫
 
         self._idle_talk = QTimer(self, timeout=self._on_idle_talk)
         self._idle_talk.start(next_idle_interval(self.speech_tier) * 1000)
@@ -429,6 +444,7 @@ class DesktopPet(FrameMixin, QWidget):
         if state == self.state:
             return
         self.state = state
+        self._breath_index = 0            # 换状态从基础帧重新开始呼吸循环
         if self._sleeping():
             self.blink = False
             self.tail_dx = 0
@@ -602,11 +618,63 @@ class DesktopPet(FrameMixin, QWidget):
         self.update()
 
     # ------------------------------------------------------------- 呼吸
+    def _has_breath_frames(self) -> bool:
+        """当前状态有没有真实呼吸帧: 有就用帧循环, 不再叠加 ±3px 程序化呼吸。"""
+        if self.state in ("sleep", "deep_sleep"):
+            return bool(self.pix_sleep_breath)
+        if self.state == "idle":
+            return bool(self.pix_idle_breath)
+        return False
+
+    def _breath_pool(self):
+        """当前状态的呼吸循环帧池: [基础帧, 吸气, 呼气]。
+
+        待机朝左时用翻转版(基础帧用 pix_idle_left, 否则退回正向);
+        睡觉不分朝向, 沿用 pix_sleep。图缺了池子里只剩基础帧,
+        _frame() 自然退回单张图, 不循环也不崩。
+        """
+        if self.state in ("sleep", "deep_sleep"):
+            base = self.pix_sleep or self.pix_idle
+            return [p for p in [base] + self.pix_sleep_breath if p is not None]
+        if self.state == "idle":
+            if self.facing < 0 and self.pix_idle_left is not None:
+                base = self.pix_idle_left
+                extra = self.pix_idle_breath_l or self.pix_idle_breath
+            else:
+                base = self.pix_idle
+                extra = self.pix_idle_breath
+            return [p for p in [base] + extra if p is not None]
+        return []
+
+    def _on_breath_tick(self):
+        """呼吸帧推进: 每 BREATH_MS 一次, 守卫在 phase1.should_advance_breath 里。
+
+        只推下标不直接画: _on_frame 每 33ms 会比对帧名, 变了就重建 mask 并重绘。
+        """
+        try:
+            if not should_advance_breath(self.state, self.anim_enabled,
+                                           self.power_saver, self._eating,
+                                           self._doing_action(), self._petting,
+                                           self._holding, self._jumping):
+                return
+            new_index = next_breath_index(self._breath_index, len(self._breath_pool()))
+            if new_index != self._breath_index:
+                self._breath_index = new_index
+                self._relayout()
+                self._rebuild_mask()
+                self.update()
+        except Exception:
+            self._log_error("breath")
+
     def _update_breath(self):
         try:
             self.breath_group.stop()
             self._dy = 0
             if not (self.anim_enabled and not self.power_saver) or self._jumping:
+                self.update()
+                return
+            # 有真实呼吸帧时不叠加程序化位移, 避免双重抖动
+            if self._has_breath_frames():
                 self.update()
                 return
             duration = {"deep_sleep": 1800, "sleep": 1000}.get(self.state, 520)
@@ -1712,7 +1780,7 @@ class DesktopPet(FrameMixin, QWidget):
         for timer in (self._frame_timer, self._walk_timer, self._logic_timer,
                       self._idle_talk, self._next_walk, self._water_timer,
                       self._pet_timer, self._eat_timer, self._action_timer,
-                      self._weather_timer):
+                      self._breath_timer, self._weather_timer):
             timer.stop()
         self._unregister_hotkeys()
         if getattr(self, "_shake_timer", None) is not None:   # 抖动是懒建的, 可能还没建

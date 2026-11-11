@@ -30,6 +30,9 @@ EAT_MS = 180                     # 咀嚼每帧停留(毫秒)
 IMG_STRETCH = ["cat_stretch_1.png", "cat_stretch_2.png"]  # 可选: 伸懒腰两帧(蹲着准备/前爪前伸)
 IMG_YAWN = ["cat_yawn_1.png", "cat_yawn_2.png"]          # 可选: 打哈欠两帧(小口微张/大口捂嘴)
 ACTION_MS = 450                  # 伸懒腰/打哈欠每帧停留(毫秒), 两帧各播两轮约 1.8 秒
+IMG_IDLE_BREATH = ["cat_idle_breath_1.png", "cat_idle_breath_2.png"]    # 可选: 待机呼吸两帧(吸气/呼气)
+IMG_SLEEP_BREATH = ["cat_sleep_breath_1.png", "cat_sleep_breath_2.png"]  # 可选: 睡觉呼吸两帧(吸气/呼气)
+BREATH_MS = 1200                 # 呼吸每帧停留(毫秒): 待机/睡觉各 3 帧一轮约 3.6 秒
 
 BASE_H = 220            # 1.0x 时猫的显示高度(逻辑像素)
 TOP_MARGIN = 64         # 窗口顶部留白, 必须 > JUMP_HEIGHT

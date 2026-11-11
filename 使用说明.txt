@@ -141,6 +141,8 @@ pet.json 提交进仓库。
   cat_eat.png / cat_eat2.png   吃东西两帧（张嘴 / 闭嘴，可选）
   cat_stretch_1.png / cat_stretch_2.png   伸懒腰两帧（蹲着准备 / 前爪前伸，可选）
   cat_yawn_1.png / cat_yawn_2.png   打哈欠两帧（小口微张 / 大口捂嘴，可选）
+  cat_idle_breath_1.png / cat_idle_breath_2.png   待机呼吸两帧（吸气 / 呼气，可选）
+  cat_sleep_breath_1.png / cat_sleep_breath_2.png   睡觉呼吸两帧（吸气 / 呼气，可选）
   cat_walk_1.png … cat_walk_8.png   走路的循环帧（1–8 张，可选）
   tray_icon.png   托盘图标（可选）
 
