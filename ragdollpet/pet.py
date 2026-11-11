@@ -50,21 +50,20 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 import traceback
-from datetime import date
+from datetime import date, datetime
 
 from PyQt5.QtCore import (
-    QDate, QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF,
+    QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF,
     QSequentialAnimationGroup, QSize, QTimer, Qt, pyqtProperty,
 )
 from PyQt5.QtGui import (
-    QBitmap, QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion,
-    QTransform,
+    QBrush, QColor, QCursor, QFont, QPainter, QPen, QPixmap, QRegion,
 )
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QCheckBox, QDateEdit, QDialog, QDialogButtonBox,
-    QFormLayout, QLabel, QLineEdit, QMenu, QSpinBox, QWidget,
+    QAction, QActionGroup, QApplication, QMenu, QWidget,
 )
 
 from .assets import resource_path
@@ -73,11 +72,18 @@ from .config import (
     BASE_H, BLINK_RATIO, BUBBLE_GAP, DOUBLE_CLICK_SEC, FRAME_MS, IMG_BLINK, IMG_CLICK,
     IMG_IDLE, IMG_PET, IMG_SLEEP, IMG_WALK_LEGACY, IMG_WALK_SEQ, INSTANCE_TITLE,
     EAT_MS, IMG_EAT, IMG_HOLD, JUMP_HEIGHT, LINES_ANGRY, LINES_BACK, LINES_CLICK,
-    LINES_FEED, LINES_IDLE,
-    LINES_SLEEP, LOGIC_MS, MASK_INFLATE, PET_MS, PET_NAME, SCALE_MAX, SCALE_MIN,
-    TOP_MARGIN, Store, app_dir, get_global_idle_seconds,
+    LINES_COMFORT, LINES_DRAG, LINES_FEED, LINES_IDLE, LINES_LAUNCH, LINES_PRAISE,
+    LINES_SLEEP, LINES_TEASE, LOGIC_MS, MASK_INFLATE, PET_MS, PET_NAME, SCALE_MAX,
+    SCALE_MIN, TOP_MARGIN, Store, app_dir, get_global_idle_seconds,
 )
 from .frames import FrameMixin
+from .phase1 import (
+    LAYERS, MODES, SIZE_PRESETS, AppUsageTracker, DailyStats, DndQueue,
+    category_enabled, clamp_opacity, default_reminders, due_reminders,
+    format_weather_line, next_idle_interval, parse_reminder, snap_position,
+)
+from . import platform_win
+from .weather import WeatherError, fetch_weather
 
 
 # ================================ 桌面宠物 ================================
@@ -114,6 +120,59 @@ class DesktopPet(FrameMixin, QWidget):
         self.power_saver = store.get_bool("power_saver")
         self.anni_name = store.get_str("anni_name")
         self.anni_date = store.get_str("anni_date")
+
+        # ---------- 配置(第一期) ----------
+        self.speech_tier = store.get_str("speech_tier") or "normal"
+        self.speech_categories = store.get_dict("speech_categories")
+        self.mode = store.get_str("mode") or "free"
+        if self.mode not in MODES:
+            self.mode = "free"
+        self.window_layer = store.get_str("window_layer") or "top"
+        if self.window_layer not in LAYERS:
+            self.window_layer = "top"
+        # 迁移: 旧 pet.json 没有 window_layer 时, 按老 ontop 推导一次并落盘,
+        # 之后以 window_layer 为准(置顶开关和层级菜单改的是同一个值)。
+        try:
+            import json as _json
+            with open(store.path, encoding="utf-8") as _f:
+                _raw = _json.load(_f)
+            if isinstance(_raw, dict) and "window_layer" not in _raw:
+                self.window_layer = "top" if self.always_on_top else "normal"
+                store.set("window_layer", self.window_layer)
+        except (OSError, ValueError):
+            pass
+        self.opacity = clamp_opacity(store.get_float("opacity"))
+        self.locked = store.get_bool("locked")
+        self.click_through = store.get_bool("click_through")
+        self.autostart = store.get_bool("autostart")
+        self.size_preset = store.get_str("size_preset")
+        self.reminders = []
+        for raw in store.get_list("reminders") or default_reminders():
+            try:
+                self.reminders.append(parse_reminder(raw))
+            except ValueError:
+                continue
+        if not self.reminders:
+            self.reminders = default_reminders()
+        self.dnd_default_min = max(1, store.get_int("dnd_default_min"))
+        self.weather_on = store.get_bool("weather_on")
+        self.weather_city = store.get_str("weather_city")
+        self.app_watch = store.get_list("app_watch")
+        self.app_launch_on = store.get_bool("app_launch_on")
+        self.hotkeys = store.get_list("hotkeys")
+        # 今日统计: 跨天自动清零(存在 pet.json 的扁平键里, 向后兼容)
+        today = date.today().isoformat()
+        if store.get_str("stats_date") != today:
+            self._stats = DailyStats(date_str=today)
+            self._persist_stats()
+        else:
+            self._stats = DailyStats.from_store(today, store.data)
+        self._dnd = DndQueue()
+        self._app_tracker = AppUsageTracker(self.app_watch)
+        self._weather_result = None     # 后台线程查天气的结果 {"done": bool, ...}
+        self._hotkeys_registered = False
+        self._hotkey_map = {}           # RegisterHotKey id -> 快捷键记录
+        self._follow_target = None
 
         # ---------- 状态 ----------
         self.state = "idle"            # idle / walk / sleep / deep_sleep
@@ -235,7 +294,7 @@ class DesktopPet(FrameMixin, QWidget):
         self._logic_timer.start(LOGIC_MS)
 
         self._idle_talk = QTimer(self, timeout=self._on_idle_talk)
-        self._idle_talk.start(random.randint(18, 35) * 1000)
+        self._idle_talk.start(next_idle_interval(self.speech_tier) * 1000)
 
         self._next_walk = QTimer(self, timeout=self._start_walk)
         self._next_walk.setSingleShot(True)
@@ -248,6 +307,12 @@ class DesktopPet(FrameMixin, QWidget):
         self._pet_timer.setSingleShot(True)
 
         self._apply_runtime()
+        self._apply_layer(silent=True)
+        self._apply_opacity()
+        self._apply_click_through()
+        # 天气后台查询的轮询(500ms 看一次线程结果, 不卡 UI)
+        self._weather_timer = QTimer(self, timeout=self._on_weather_poll)
+        self._weather_timer.start(500)
 
         QTimer.singleShot(1500, self._startup_line)
 
@@ -315,9 +380,28 @@ class DesktopPet(FrameMixin, QWidget):
         used.add(index)
         return pool[index]
 
-    def _say(self, text: str):
-        if text:
-            self.bubble.say(text)
+    def _say(self, text: str, category: str = None):
+        """所有台词的唯一出口。
+
+        category: 语录类别, 关了整类就不说(触发类台词优先于闲聊, 但类别
+        开关仍管自己的类); 免打扰期间不直接说, 先攒进队列, 结束再汇总。
+        """
+        if not text:
+            return
+        if category is not None and not category_enabled(self.speech_categories, category):
+            return
+        if self._dnd.active():
+            self._dnd.queue(text)
+            return
+        self.bubble.say(text)
+
+    def _persist_stats(self):
+        for key, value in self._stats.to_store_dict().items():
+            self.store.set(key, value)
+
+    def _bump_stat(self, field: str):
+        self._stats.bump(field)
+        self.store.set("stat_" + field, self._stats.counts[field])
 
     # ------------------------------------------------------------- 状态
     def _sleeping(self) -> bool:
@@ -334,7 +418,7 @@ class DesktopPet(FrameMixin, QWidget):
             self._stop_walk()
             self._petting = False          # 睡着就别继续眯眼蹭头了
             self._pet_timer.stop()
-        self.setWindowOpacity(0.55 if state == "deep_sleep" else 1.0)
+        self._apply_opacity()              # 深睡半透明按“设置值与 0.55 取小”算
         self._relayout()
         self._rebuild_mask()
         self._update_breath()
@@ -344,7 +428,7 @@ class DesktopPet(FrameMixin, QWidget):
         if self._sleeping():
             return
         self._set_state("sleep")
-        self._say(self._pick(LINES_SLEEP))
+        self._say(self._pick(LINES_SLEEP), category="sleep")
 
     def _enter_deep_sleep(self):
         if self.state == "deep_sleep":
@@ -358,12 +442,13 @@ class DesktopPet(FrameMixin, QWidget):
         was_deep = self.state == "deep_sleep"
         self.last_interact = time.monotonic()
         self._set_state("idle")
+        self._bump_stat("wakes")
         self._schedule_walk(60, 120)          # 睡醒后继续安排散步(修复卡住不走的 bug)
         if by_input and was_deep and random.random() < 0.35:
-            self._say(self._pick(LINES_BACK))
+            self._say(self._pick(LINES_BACK), category="back")
         if self._water_pending:
             self._water_pending = False
-            QTimer.singleShot(1500, lambda: self._say("对啦, 刚才叫你喝水来着～现在去倒杯水吧"))
+            QTimer.singleShot(1500, lambda: self._say("对啦, 刚才叫你喝水来着～现在去倒杯水吧", category="water"))
 
     def _touch(self):
         """任何鼠标交互都算被摸过。"""
@@ -373,7 +458,7 @@ class DesktopPet(FrameMixin, QWidget):
 
     # ------------------------------------------------------------- 定时器
     def _on_logic(self):
-        """1 秒一次: 睡眠判定 + 气泡跟随。"""
+        """1 秒一次: 睡眠判定 + 气泡跟随 + 第一期: 免打扰/定时提醒/应用/跟随模式。"""
         try:
             idle = get_global_idle_seconds()
             if idle >= 0:
@@ -389,6 +474,12 @@ class DesktopPet(FrameMixin, QWidget):
             if not self._visible_somewhere(self.pos()):
                 self.move(self._clamp_pos(self.pos()))
             self.bubble.follow(self.pos(), self.size(), self._content_top())
+            # ---- 第一期 ----
+            self._check_dnd_flush()
+            self._check_reminders()
+            self._poll_foreground_app(idle)
+            self._follow_mouse_tick()
+            self._rollover_stats_if_needed()
         except Exception:
             self._log_error("logic")
 
@@ -463,14 +554,20 @@ class DesktopPet(FrameMixin, QWidget):
 
     # ------------------------------------------------------------- 走动
     def _schedule_walk(self, low: int = 60, high: int = 120):
+        # 原地待着模式: 不排散步; 跟随鼠标模式: 走路由 _follow_mouse_tick 管
+        if self.mode != "free":
+            return
         self._next_walk.start(random.randint(low, high) * 1000)
 
     def _start_walk(self):
+        if self.mode != "free":
+            return
         if (self._sleeping() or self._jumping or self._petting
                 or self.power_saver or not self.anim_enabled):
             self._schedule_walk(30, 60)
             return
         self.state = "walk"
+        self._bump_stat("walks")
         self._walk_left = random.randint(90, 180)
         self._walk_total = self._walk_left                 # 缓动要用总步数
         self._walk_toggle = 0                                # 从头开始步态循环
@@ -479,7 +576,7 @@ class DesktopPet(FrameMixin, QWidget):
         self._relayout()                        # 万一 walk 帧尺寸和 idle 不同, 先适配
         self._rebuild_mask()
         self.update()
-        self._say(self._pick(LINES_IDLE))
+        self._say(self._pick(LINES_IDLE), category="idle")
 
     def _stop_walk(self):
         self._walk_timer.stop()
@@ -549,11 +646,16 @@ class DesktopPet(FrameMixin, QWidget):
                 pass
             elif self.state == "sleep":
                 if random.random() < 0.5:
-                    self._say(self._pick(LINES_SLEEP))
+                    self._say(self._pick(LINES_SLEEP), category="sleep")
             elif not self.power_saver:
-                self._say(self._pick(LINES_IDLE))
+                self._say(self._pick(LINES_IDLE), category="idle")
         finally:
-            self._idle_talk.start(random.randint(20, 40) * 1000)
+            self._idle_talk.start(next_idle_interval(self.speech_tier) * 1000)
+
+    def _apply_idle_talk_interval(self):
+        """语录频率改了: 下一次闲聊按新档位重排(正在等的这一次也重排)。"""
+        self._idle_talk.stop()
+        self._idle_talk.start(next_idle_interval(self.speech_tier) * 1000)
 
     def _apply_water_timer(self):
         self._water_timer.stop()
@@ -562,13 +664,288 @@ class DesktopPet(FrameMixin, QWidget):
 
     def _on_water_remind(self):
         if self.water_enabled:
+            self._bump_stat("reminders")
             if self.state == "deep_sleep":
                 # 只有深睡(人明显不在)才攒着, 醒来补弹
                 self._water_pending = True
             else:
                 # 浅睡说明人就在电脑前, 只是没摸猫 —— 直接弹
-                self._say(f"{PET_NAME}提醒你：该喝水啦～起来倒杯水，活动一下吧")
+                self._say(f"{PET_NAME}提醒你：该喝水啦～起来倒杯水，活动一下吧", category="water")
         self._apply_water_timer()
+
+    # ------------------------------------------------- 第一期: 免打扰 / 定时提醒
+    def start_dnd(self, minutes: int):
+        """开始免打扰 N 分钟: 期间一句话都不说, 提醒攒着, 结束汇总一句。"""
+        minutes = max(1, int(minutes))
+        self._dnd.start(minutes)
+        self.bubble.hide()
+
+    def end_dnd(self):
+        """提前结束免打扰: 有攒下的提醒就汇总一句。"""
+        if not self._dnd.active() and not self._dnd.queued:
+            return
+        summary = self._dnd.flush_summary(PET_NAME)
+        if summary:
+            self._say(summary)
+
+    def _check_dnd_flush(self):
+        """免打扰时间到了: 自动汇总一句(没攒下东西就不说)。"""
+        if self._dnd.until is not None and not self._dnd.active():
+            summary = self._dnd.flush_summary(PET_NAME)
+            if summary:
+                self._say(summary)
+
+    def _check_reminders(self):
+        """定时提醒: 每秒看一次, 到点的说一句并记 last_fired, 写回 pet.json。"""
+        if not self.reminders:
+            return
+        due = due_reminders(self.reminders, datetime.now())
+        if not due:
+            return
+        self.store.set("reminders", self.reminders)
+        for reminder in due:
+            self._bump_stat("reminders")
+            self._say(reminder["text"])
+
+    def show_today_summary(self):
+        """今日汇总: 只报本地统计, 没有余额, 不要编造余额。"""
+        self._say(self._stats.summary_text(PET_NAME))
+
+    def _rollover_stats_if_needed(self):
+        """跨天: 今日统计清零(只清计数, 不动其他配置)。"""
+        today = date.today().isoformat()
+        if self._stats.date_str != today:
+            self._stats = DailyStats(date_str=today)
+            self._persist_stats()
+
+    # ------------------------------------------------- 第一期: 跟随鼠标模式
+    def _follow_mouse_tick(self):
+        """跟随鼠标模式: 待机时慢慢向光标横向靠近(只动 x, 不动 y)。"""
+        if self.mode != "follow":
+            return
+        if self._sleeping() or self._jumping or self._petting or self._dragging:
+            return
+        if not (self.anim_enabled and not self.power_saver):
+            return
+        try:
+            cursor = QCursor.pos()
+            area = self._screen().availableGeometry()
+            if not area.contains(cursor):
+                return
+            target_x = cursor.x() - self.width() // 2
+            dx = target_x - self.x()
+            if abs(dx) < 4:
+                return
+            step = max(1, min(8, abs(dx)))
+            self.facing = 1 if dx > 0 else -1
+            self.move(self._clamp_pos(QPoint(self.x() + (step if dx > 0 else -step),
+                                             self.y())))
+            self.bubble.follow(self.pos(), self.size(), self._content_top())
+        except Exception:
+            self._log_error("follow")
+
+    # ------------------------------------------------- 第一期: 应用联动
+    def _rebuild_app_tracker(self):
+        self._app_tracker = AppUsageTracker(self.app_watch)
+
+    def _poll_foreground_app(self, idle_seconds: float):
+        """每秒一次: 前台应用检测(仅 Windows, 其他平台直接返回)。"""
+        if not self.app_watch and not self.app_launch_on:
+            return
+        if not platform_win.is_windows():
+            return
+        try:
+            info = platform_win.get_foreground_app()
+        except Exception:
+            return
+        if not info:
+            return
+        now = time.monotonic()
+        events = self._app_tracker.update(info["exe"], now, idle_seconds,
+                                          launch_on=self.app_launch_on)
+        for event in events:
+            if event["kind"] == "launch":
+                line = self._pick(LINES_LAUNCH)
+                if line:
+                    self._say(line.replace("{app}", event["app"]))
+            elif event["kind"] == "usage":
+                self._bump_stat("reminders")
+                self._say(f"{event['app']} 已经连续用了 {event['minutes']} 分钟啦，"
+                          f"起来活动一下吧～")
+
+    # ------------------------------------------------- 第一期: 天气(免 Key)
+    def _check_weather(self, city: str = None):
+        """后台线程查天气, 查到后气泡播报中文; 失败也播报一句, 不崩。"""
+        if not self.weather_on and city is None:
+            return
+        city = (city or self.weather_city or "").strip()
+        if not city:
+            self._say("先在设置里填个城市，我才能帮你查天气哦～")
+            return
+        if self._weather_result is not None and not self._weather_result.get("done"):
+            return  # 上一次还没查完, 别重复开线程
+        self._weather_result = {"done": False, "city": city}
+
+        def _run():
+            try:
+                info = fetch_weather(city)
+                self._weather_result.update({"done": True, "info": info})
+            except WeatherError as exc:
+                self._weather_result.update({"done": True, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001  后台线程绝不能把异常带回 UI
+                self._weather_result.update({"done": True, "error": f"天气查不到：{exc}"})
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_weather_poll(self):
+        result = self._weather_result
+        if not result or not result.get("done"):
+            return
+        self._weather_result = None
+        if result.get("info"):
+            self._say(format_weather_line(result["city"], result["info"]))
+        else:
+            self._say(result.get("error") or "天气查不到，稍后再试试吧")
+
+    # ------------------------------------------------- 第一期: 窗口(层级/透明度/穿透/自启/大小)
+    def _apply_layer(self, silent: bool = False):
+        """层级: top 置顶 / normal 普通 / bottom 置底。"""
+        flags = self.windowFlags()
+        flags &= ~(Qt.WindowStaysOnTopHint | Qt.WindowStaysOnBottomHint)
+        if self.window_layer == "top":
+            flags |= Qt.WindowStaysOnTopHint
+        elif self.window_layer == "bottom":
+            flags |= Qt.WindowStaysOnBottomHint
+        self.always_on_top = (self.window_layer == "top")
+        self.store.set("ontop", self.always_on_top)
+        pos = self.pos()
+        self.setWindowFlags(flags)            # 会重建原生窗口
+        self.move(pos)
+        self.show()
+        self._rebuild_mask()
+        if not silent:
+            self.update()
+
+    def _apply_on_top(self, silent: bool = False):
+        # 兼容旧调用: 以 always_on_top 为准同步一次层级(置底时不动, 避免互相打架)。
+        if self.window_layer != "bottom":
+            self.window_layer = "top" if self.always_on_top else "normal"
+        self._apply_layer(silent=silent)
+
+    def _apply_opacity(self):
+        """透明度: 深睡时取 min(设置值, 0.55), 其他状态直接用设置值。"""
+        target = self.opacity if self.state != "deep_sleep" else min(self.opacity, 0.55)
+        self.setWindowOpacity(target)
+
+    def _apply_click_through(self):
+        """鼠标穿透: 开了就点不中猫(从托盘右键解除); 关了恢复正常。"""
+        flags = self.windowFlags()
+        if self.click_through:
+            flags |= Qt.WindowTransparentForInput
+        else:
+            flags &= ~Qt.WindowTransparentForInput
+        pos = self.pos()
+        self.setWindowFlags(flags)
+        self.move(pos)
+        self.show()
+        self._rebuild_mask()
+
+    def _apply_autostart(self):
+        """开机自启: 仅 Windows 写注册表 Run 键; 其他平台只记配置, 不报错。"""
+        if not platform_win.is_windows():
+            return
+        ok = platform_win.set_autostart(self.autostart)
+        if not ok and self.autostart:
+            print("[pet] 开机自启写注册表失败, 已忽略", file=sys.stderr)
+
+    def _apply_size_preset(self, name: str):
+        """大小档位: 按档位设缩放, 保持中心不动。"""
+        scale = SIZE_PRESETS.get(name)
+        if scale is None:
+            return
+        self.scale = scale
+        self.size_preset = name
+        self.store.set("scale_val", self.scale)
+        center = self.geometry().center()
+        self._relayout()
+        self.move(center - self.rect().center())
+        self._rebuild_mask()
+        self.update()
+
+    # ------------------------------------------------- 第一期: 全局快捷键
+    def showEvent(self, event):
+        # 窗口第一次显示出来才有原生句柄, 这时再注册全局快捷键。
+        super().showEvent(event)
+        if not self._hotkeys_registered:
+            self._hotkeys_registered = True
+            self._apply_hotkeys()
+
+    def _apply_hotkeys(self):
+        """(重)注册全局快捷键: 仅 Windows; 其他平台直接跳过, 不报错。"""
+        if not platform_win.is_windows():
+            return
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            return
+        for hotkey_id in list(self._hotkey_map):
+            platform_win.unregister_hotkey(hwnd, hotkey_id)
+        self._hotkey_map = {}
+        from .phase1 import hotkey_to_windows
+        for index, item in enumerate(self.hotkeys or []):
+            if not isinstance(item, dict) or not item.get("enabled", True):
+                continue
+            try:
+                mods, vk = hotkey_to_windows(str(item.get("key", "")))
+            except ValueError:
+                continue
+            hotkey_id = 0xA000 + index
+            if platform_win.register_hotkey(hwnd, hotkey_id, mods, vk):
+                self._hotkey_map[hotkey_id] = item
+
+    def _unregister_hotkeys(self):
+        if not platform_win.is_windows() or not self._hotkey_map:
+            return
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            return
+        for hotkey_id in list(self._hotkey_map):
+            platform_win.unregister_hotkey(hwnd, hotkey_id)
+        self._hotkey_map = {}
+
+    def nativeEvent(self, eventType, message):
+        if platform_win.is_windows() and eventType == b"windows_generic_MSG":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                class MSG(ctypes.Structure):
+                    _fields_ = [("hwnd", wintypes.HWND), ("message", wintypes.UINT),
+                                ("wParam", wintypes.WPARAM), ("lParam", wintypes.LPARAM),
+                                ("time", wintypes.DWORD), ("pt", wintypes.POINT)]
+
+                msg = ctypes.cast(int(message), ctypes.POINTER(MSG)).contents
+                if msg.message == platform_win.WM_HOTKEY:
+                    self._on_hotkey(msg.wParam)
+                    return True, 0
+            except Exception:
+                pass
+        return super().nativeEvent(eventType, message)
+
+    def _on_hotkey(self, hotkey_id: int):
+        item = self._hotkey_map.get(hotkey_id)
+        if not item:
+            return
+        kind = str(item.get("kind", ""))
+        custom = str(item.get("text", "")).strip()
+        if kind == "custom" and custom:
+            self._say(custom, category="hotkey")
+            return
+        pool = {"praise": LINES_PRAISE, "comfort": LINES_COMFORT,
+                "tease": LINES_TEASE}.get(kind)
+        if pool:
+            self._say(self._pick(pool), category="hotkey")
 
     # ------------------------------------------------------------- 纪念日
     def _startup_line(self):
@@ -591,11 +968,11 @@ class DesktopPet(FrameMixin, QWidget):
             return
         self.store.set("last_anni_shown", today)
         if days > 0:
-            self._say(f"距离「{self.anni_name}」还有 {days} 天～")
+            self._say(f"距离「{self.anni_name}」还有 {days} 天～", category="anni")
         elif days == 0:
-            self._say(f"今天就是「{self.anni_name}」!")
+            self._say(f"今天就是「{self.anni_name}」!", category="anni")
         else:
-            self._say(f"「{self.anni_name}」已经过去 {-days} 天啦")
+            self._say(f"「{self.anni_name}」已经过去 {-days} 天啦", category="anni")
 
     def _maybe_show_anni(self):
         if not self.anni_name or not self.anni_date:
@@ -605,9 +982,9 @@ class DesktopPet(FrameMixin, QWidget):
         except ValueError:
             return
         if days > 0:
-            self._say(f"偷偷告诉你, 再过 {days} 天就是{self.anni_name}啦")
+            self._say(f"偷偷告诉你, 再过 {days} 天就是{self.anni_name}啦", category="anni")
         elif days == 0:
-            self._say(f"今天就是{self.anni_name}！要开心哦")
+            self._say(f"今天就是{self.anni_name}！要开心哦", category="anni")
 
     # ------------------------------------------------------------- 交互
     def enterEvent(self, event):
@@ -627,6 +1004,10 @@ class DesktopPet(FrameMixin, QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self.locked:
+            # 锁定位置: 拖不动, 但单击/右键照旧(在 mouseReleaseEvent 里处理)
+            super().mouseMoveEvent(event)
+            return
         if self._drag_off is not None and event.buttons() & Qt.LeftButton:
             if (event.globalPos() - self._press_pos).manhattanLength() > 5:
                 if not self._dragging and self.pix_hold is not None:
@@ -650,8 +1031,19 @@ class DesktopPet(FrameMixin, QWidget):
             if not self._dragging:
                 self._on_click()
             else:
+                self._snap_to_edge()
                 self._save_pos()
+                if random.random() < 0.3:
+                    self._say(self._pick(LINES_DRAG), category="drag")
         super().mouseReleaseEvent(event)
+
+    def _snap_to_edge(self):
+        """拖拽松手后吸附到屏幕四边(24px 内就贴过去)。"""
+        area = self._screen().availableGeometry()
+        x, y = snap_position(self.x(), self.y(), self.width(), self.height(),
+                             (area.left(), area.top(), area.right(), area.bottom()))
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
 
     def wheelEvent(self, event):
         steps = event.angleDelta().y() / 120.0
@@ -661,7 +1053,9 @@ class DesktopPet(FrameMixin, QWidget):
         if abs(target - self.scale) < 0.005:
             return
         self.scale = round(target, 3)
+        self.size_preset = ""              # 滚轮无级调后不再是某个档位
         self.store.set("scale_val", self.scale)
+        self.store.set("size_preset", "")
         center = self.geometry().center()
         self._relayout()
         self.move(center - self.rect().center())
@@ -670,6 +1064,7 @@ class DesktopPet(FrameMixin, QWidget):
 
     def _on_click(self):
         """单击 = 被摸(有 cat_pet.png 时); 500ms 内再点 = 连戳, 炸毛跳 + 抖一抖。"""
+        self._bump_stat("clicks")
         now = time.monotonic()
         rapid = (now - self._last_click_at) < DOUBLE_CLICK_SEC
         self._last_click_at = now
@@ -677,14 +1072,14 @@ class DesktopPet(FrameMixin, QWidget):
             self._end_pet()                       # 取消被摸, 换成炸毛
             self._start_angry()                   # 炸毛表情 + 窗口抖动(保证看得见)
             self._jump()
-            self._say(self._pick(LINES_ANGRY))
+            self._say(self._pick(LINES_ANGRY), category="pet")
             return
         if self.pix_pet is not None and not self._jumping:
             self._start_pet()
-            self._say(self._pick(LINES_CLICK))
+            self._say(self._pick(LINES_CLICK), category="pet")
             return
         self._jump()                              # 没被摸帧: 退回老行为
-        self._say(self._pick(LINES_CLICK))
+        self._say(self._pick(LINES_CLICK), category="pet")
 
     # ------------------------------------------------------------- 被摸
     def _start_pet(self):
@@ -772,7 +1167,94 @@ class DesktopPet(FrameMixin, QWidget):
         menu.addAction(self._act_power)
 
         menu.addSeparator()
-        act_settings = QAction("提醒与纪念日设置…", menu)
+        # ---- 第一期: 模式(单选) ----
+        menu_mode = menu.addMenu("模式")
+        self._mode_group = QActionGroup(menu_mode)
+        self._mode_group.setExclusive(True)
+        self._mode_actions = {}
+        from .phase1 import MODE_NAMES
+        for key in MODES:
+            act = QAction(MODE_NAMES[key], menu_mode, checkable=True)
+            act.setData(key)
+            act.triggered.connect(lambda _c, k=key: self._set_mode(k))
+            self._mode_group.addAction(act)
+            menu_mode.addAction(act)
+            self._mode_actions[key] = act
+
+        # ---- 第一期: 语录频率(单选) ----
+        menu_tier = menu.addMenu("语录频率")
+        self._tier_group = QActionGroup(menu_tier)
+        self._tier_group.setExclusive(True)
+        self._tier_actions = {}
+        from .phase1 import SPEECH_TIER_NAMES
+        for key in ("quiet", "normal", "chatty", "talkative"):
+            act = QAction(SPEECH_TIER_NAMES[key], menu_tier, checkable=True)
+            act.setData(key)
+            act.triggered.connect(lambda _c, k=key: self._set_speech_tier(k))
+            self._tier_group.addAction(act)
+            menu_tier.addAction(act)
+            self._tier_actions[key] = act
+
+        # ---- 第一期: 大小档位(单选, 另有滚轮无级调) ----
+        menu_size = menu.addMenu("大小")
+        self._size_group = QActionGroup(menu_size)
+        self._size_group.setExclusive(True)
+        self._size_actions = {}
+        for name in SIZE_PRESETS:
+            act = QAction(f"{name}（{SIZE_PRESETS[name]}×）", menu_size, checkable=True)
+            act.setData(name)
+            act.triggered.connect(lambda _c, n=name: self._apply_size_preset(n))
+            self._size_group.addAction(act)
+            menu_size.addAction(act)
+            self._size_actions[name] = act
+
+        # ---- 第一期: 层级(单选) ----
+        menu_layer = menu.addMenu("窗口层级")
+        self._layer_group = QActionGroup(menu_layer)
+        self._layer_group.setExclusive(True)
+        self._layer_actions = {}
+        from .phase1 import LAYER_NAMES
+        for key in LAYERS:
+            act = QAction(LAYER_NAMES[key], menu_layer, checkable=True)
+            act.setData(key)
+            act.triggered.connect(lambda _c, k=key: self._set_layer(k))
+            self._layer_group.addAction(act)
+            menu_layer.addAction(act)
+            self._layer_actions[key] = act
+
+        self._act_locked = QAction("锁定位置（拖不动）", menu, checkable=True)
+        self._act_locked.triggered.connect(self._toggle_locked)
+        menu.addAction(self._act_locked)
+
+        self._act_through = QAction("鼠标穿透", menu, checkable=True)
+        self._act_through.triggered.connect(self._toggle_click_through)
+        menu.addAction(self._act_through)
+
+        self._act_autostart = QAction("开机自启", menu, checkable=True)
+        self._act_autostart.triggered.connect(self._toggle_autostart)
+        menu.addAction(self._act_autostart)
+
+        menu.addSeparator()
+        act_weather = QAction("查看天气", menu)
+        act_weather.triggered.connect(lambda: self._check_weather(city=self.weather_city))
+        menu.addAction(act_weather)
+
+        act_summary = QAction("今日汇总", menu)
+        act_summary.triggered.connect(self.show_today_summary)
+        menu.addAction(act_summary)
+
+        # ---- 第一期: 免打扰 ----
+        menu_dnd = menu.addMenu("免打扰")
+        for minutes in (15, 30, 60, 120):
+            act = QAction(f"免打扰 {minutes} 分钟", menu_dnd)
+            act.triggered.connect(lambda _c, m=minutes: self.start_dnd(m))
+            menu_dnd.addAction(act)
+        self._act_dnd_end = QAction("结束免打扰", menu_dnd)
+        self._act_dnd_end.triggered.connect(self.end_dnd)
+        menu_dnd.addAction(self._act_dnd_end)
+
+        menu.addSeparator()
+        act_settings = QAction("设置…", menu)
         act_settings.triggered.connect(self._open_settings)
         menu.addAction(act_settings)
 
@@ -796,14 +1278,63 @@ class DesktopPet(FrameMixin, QWidget):
         self._act_top.setChecked(self.always_on_top)
         self._act_anim.setChecked(self.anim_enabled)
         self._act_power.setChecked(self.power_saver)
+        self._act_locked.setChecked(self.locked)
+        self._act_through.setChecked(self.click_through)
+        self._act_autostart.setChecked(self.autostart)
+        for key, act in self._mode_actions.items():
+            act.setChecked(key == self.mode)
+        for key, act in self._tier_actions.items():
+            act.setChecked(key == self.speech_tier)
+        for name, act in self._size_actions.items():
+            act.setChecked(name == self.size_preset)
+        for key, act in self._layer_actions.items():
+            act.setChecked(key == self.window_layer)
         self._menu.exec_(global_pos)
+
+    # ---- 第一期: 菜单里的小开关 ----
+    def _set_mode(self, mode: str):
+        if mode not in MODES:
+            return
+        self.mode = mode
+        self.store.set("mode", mode)
+        self._stop_walk()                     # 换模式先停下当前散步, 再按新模式重排
+        self._apply_runtime()
+
+    def _set_speech_tier(self, tier: str):
+        if tier not in ("quiet", "normal", "chatty", "talkative"):
+            return
+        self.speech_tier = tier
+        self.store.set("speech_tier", tier)
+        self._apply_idle_talk_interval()
+
+    def _set_layer(self, layer: str):
+        if layer not in LAYERS:
+            return
+        self.window_layer = layer
+        self.store.set("window_layer", layer)
+        self._apply_layer()
+
+    def _toggle_locked(self, checked: bool):
+        self.locked = checked
+        self.store.set("locked", checked)
+
+    def _toggle_click_through(self, checked: bool):
+        self.click_through = checked
+        self.store.set("click_through", checked)
+        self._apply_click_through()
+
+    def _toggle_autostart(self, checked: bool):
+        self.autostart = checked
+        self.store.set("autostart", checked)
+        self._apply_autostart()
 
     def _feed(self):
         self._touch()
+        self._bump_stat("feeds")
         self._start_eat()
-        self._say(self._pick(LINES_FEED))
+        self._say(self._pick(LINES_FEED), category="feed")
         if random.random() < 0.5:
-            QTimer.singleShot(900, lambda: self._say(self._pick(LINES_FEED)))
+            QTimer.singleShot(900, lambda: self._say(self._pick(LINES_FEED), category="feed"))
 
     def _start_eat(self, rounds: int = 3):
         """喂零食: 张嘴/闭嘴两帧循环 rounds 轮, 约 0.7 秒后回待机。"""
@@ -837,8 +1368,10 @@ class DesktopPet(FrameMixin, QWidget):
 
     def _toggle_on_top(self, checked: bool):
         self.always_on_top = checked
+        self.window_layer = "top" if checked else "normal"
         self.store.set("ontop", checked)
-        self._apply_on_top()
+        self.store.set("window_layer", self.window_layer)
+        self._apply_layer()
 
     def _toggle_anim(self, checked: bool):
         self.anim_enabled = checked
@@ -860,7 +1393,9 @@ class DesktopPet(FrameMixin, QWidget):
         self._petting = False
         self._pet_timer.stop()
         self._set_state("idle")
-        self.setWindowOpacity(1.0)
+        self.opacity = 1.0
+        self.store.set("opacity", 1.0)
+        self._apply_opacity()
         self._invalidate_masks()
         self.store.set("pos_x", -99999)       # 重置 = 真的回默认角落
         self.store.set("pos_y", -99999)
@@ -873,76 +1408,9 @@ class DesktopPet(FrameMixin, QWidget):
 
     # ------------------------------------------------------------- 设置
     def _open_settings(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"{PET_NAME} 的设置")
-        form = QFormLayout(dlg)
-
-        chk_water = QCheckBox("启用喝水提醒")
-        chk_water.setChecked(self.water_enabled)
-        spin_min = QSpinBox()
-        spin_min.setRange(1, 600)
-        spin_min.setSuffix(" 分钟")
-        spin_min.setValue(self.water_interval)
-
-        spin_sleep = QSpinBox()
-        spin_sleep.setRange(1, 60)
-        spin_sleep.setSuffix(" 分钟")
-        spin_sleep.setValue(self.sleep_minutes)
-
-        spin_deep = QSpinBox()
-        spin_deep.setRange(1, 180)
-        spin_deep.setSuffix(" 分钟")
-        spin_deep.setValue(self.deep_sleep_min)
-
-        edit_name = QLineEdit(self.anni_name)
-        edit_name.setPlaceholderText("例如: 我家猫生日 / 考研倒计时")
-        edit_date = QDateEdit()
-        edit_date.setCalendarPopup(True)
-        edit_date.setDisplayFormat("yyyy-MM-dd")
-        parsed = QDate.fromString(self.anni_date, "yyyy-MM-dd") if self.anni_date else QDate()
-        edit_date.setDate(parsed if parsed.isValid() else QDate.currentDate().addDays(30))
-
-        chk_dpi = QCheckBox("启用高 DPI 适配(需重启生效)")
-        chk_dpi.setChecked(self.store.get_bool("high_dpi"))
-
-        form.addRow("喝水提醒", chk_water)
-        form.addRow("提醒间隔", spin_min)
-        form.addRow("无宠物交互多久睡觉", spin_sleep)
-        form.addRow("全局空闲多久深睡", spin_deep)
-        form.addRow("纪念日名称", edit_name)
-        form.addRow("纪念日日期", edit_date)
-        form.addRow("显示", chk_dpi)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        form.addRow(buttons)
-
-        if dlg.exec_() != QDialog.Accepted:
-            return
-
-        self.water_enabled = chk_water.isChecked()
-        self.water_interval = spin_min.value()
-        self.sleep_minutes = spin_sleep.value()
-        self.deep_sleep_min = spin_deep.value()
-        self.anni_name = edit_name.text().strip()
-        self.anni_date = edit_date.date().toString("yyyy-MM-dd")
-        self.store.set("water_on", self.water_enabled)
-        self.store.set("water_min", self.water_interval)
-        self.store.set("sleep_min", self.sleep_minutes)
-        self.store.set("deep_sleep_min", self.deep_sleep_min)
-        self.store.set("anni_name", self.anni_name)
-        self.store.set("anni_date", self.anni_date)
-        dpi_before = self.store.get_bool("high_dpi")
-        self.store.set("high_dpi", chk_dpi.isChecked())
-        self.store.set("last_anni_shown", "")
-        self._apply_water_timer()
-        # 气泡不能连发, 否则后一条立刻盖掉前一条: DPI 提示先说, 2.5 秒后再报"记好了"
-        if chk_dpi.isChecked() != dpi_before:
-            self._say("高 DPI 设置下次启动才生效哦～")
-            QTimer.singleShot(2500, lambda: self._say("设置好啦～我记住了"))
-        else:
-            self._say("设置好啦～我记住了")
+        # 统一设置窗口在 settings_ui.py(分页签); 这里只做委托, 避免 pet.py 继续膨胀。
+        from .settings_ui import open_settings_dialog
+        open_settings_dialog(self)
 
     # ------------------------------------------------------------- 绘制
     def paintEvent(self, _event):
@@ -1052,8 +1520,9 @@ class DesktopPet(FrameMixin, QWidget):
             pass
         for timer in (self._frame_timer, self._walk_timer, self._logic_timer,
                       self._idle_talk, self._next_walk, self._water_timer,
-                      self._pet_timer, self._eat_timer):
+                      self._pet_timer, self._eat_timer, self._weather_timer):
             timer.stop()
+        self._unregister_hotkeys()
         if getattr(self, "_shake_timer", None) is not None:   # 抖动是懒建的, 可能还没建
             self._shake_timer.stop()
         self.bubble.hide()

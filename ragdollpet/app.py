@@ -84,6 +84,23 @@ def setup_tray(app, pet):
     act_feed.triggered.connect(pet._feed)
     menu.addAction(act_feed)
 
+    act_weather = QAction("查看天气", menu)
+    act_weather.triggered.connect(lambda: pet._check_weather(city=pet.weather_city))
+    menu.addAction(act_weather)
+
+    act_summary = QAction("今日汇总", menu)
+    act_summary.triggered.connect(pet.show_today_summary)
+    menu.addAction(act_summary)
+
+    menu_dnd = menu.addMenu("免打扰")
+    for minutes in (15, 30, 60, 120):
+        act = QAction(f"免打扰 {minutes} 分钟", menu_dnd)
+        act.triggered.connect(lambda _c, m=minutes: pet.start_dnd(m))
+        menu_dnd.addAction(act)
+    act_dnd_end = QAction("结束免打扰", menu_dnd)
+    act_dnd_end.triggered.connect(pet.end_dnd)
+    menu_dnd.addAction(act_dnd_end)
+
     menu.addSeparator()
     act_top = QAction("始终置顶", menu, checkable=True)
     act_top.setChecked(pet.always_on_top)
@@ -102,7 +119,7 @@ def setup_tray(app, pet):
 
     menu.addSeparator()
 
-    act_settings = QAction("提醒与纪念日设置…", menu)
+    act_settings = QAction("设置…", menu)
     act_settings.triggered.connect(pet._open_settings)
     menu.addAction(act_settings)
 
