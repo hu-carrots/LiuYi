@@ -1,8 +1,8 @@
-# 六一 · 桌面宠物 v2.1.1 — 优化说明 / 使用说明 / 评价
+# 六一 · 桌面宠物 v2.2 + 第一期 — 优化说明 / 使用说明 / 评价
 
-小猫叫**六一**，是一只海豹双色布偶。`desktop_pet_v2.1.py` 基于 v2.0 重写，**接口不变、老配置自动沿用**。1362 行，单文件，依赖仍只有 `PyQt5==5.15.11`。
+小猫叫**六一**，是一只海豹双色布偶。v2.2 起代码已拆进 `ragdollpet/` 包，**接口不变、老配置自动沿用**。依赖仍只有 `PyQt5==5.15.11`（见 `requirements.txt`）。
 
-## v2.3 第一期：桌宠功能对齐（离线，不含 AI）
+## 第一期：桌宠功能对齐（v2.2，离线，不含 AI）
 
 对标 DeepSeek 大肥鱼桌宠版的功能，但**保留六一猫人设、不换鲸鱼、不接任何 AI、不需要 API Key**。
 AI 聊天 / 长期记忆 / 自由时间逛 B 站是第二、三期，本期没有。
@@ -43,8 +43,8 @@ pet.json 新增字段（旧文件没有时自动补默认值）：`speech_tier`�
 ### 跑起来
 
 ```powershell
-pip install PyQt5==5.15.11     # 只装一次
-python "D:\Download\六一桌宠\desktop_pet_v2.1.py"   # 这是启动器, 代码在 ragdollpet\
+pip install -r requirements.txt   # 只装一次，主程序依赖
+python desktop_pet_v2.1.py        # 启动器（历史文件名，见“目录结构”说明），代码在 ragdollpet\
 ```
 
 - 双击 `desktop_pet_v2.1.py` 也行（关联了 .py 的话）。
@@ -91,7 +91,7 @@ python "D:\Download\六一桌宠\desktop_pet_v2.1.py"   # 这是启动器, 代�
 | 始终置顶 | 关掉后会被其它窗口盖住 |
 | 动画开关 | 关掉呼吸/眨眼/甩尾/散步，适合录屏或嫌晃 |
 | 省电模式 | 只保留 1 秒一次的状态检查，几乎不占 CPU |
-| 提醒与纪念日设置… | 喝水间隔、睡觉阈值、纪念日 |
+| 设置… | 6 个页签：提醒与纪念日 / 语录 / 定时提醒 / 模式与窗口 / 应用与快捷键 / 天气 |
 | 重置窗口位置与透明效果 | 位置跑偏 / 显示异常时用，回到右下角并恢复不透明 |
 | 投喂小零食 | 说一句投喂台词 |
 | 退出 | 保存位置后退出 |
@@ -175,63 +175,59 @@ python -m unittest discover -s tests -v
 
 ```
 六一桌宠\
-├── desktop_pet_v2.1.py   启动器（双击它）
+├── desktop_pet_v2.1.py   启动器（双击它；文件名是历史名称，见下）
 ├── import_frames.py     离线补帧导入（Pillow）
 ├── frame_geometry.py    导入与运行时共用尺寸 / 基线
-├── requirements-import.txt  导入工具依赖
+├── requirements.txt         主程序依赖（PyQt5==5.15.11）
+├── requirements-import.txt  导入工具依赖（Pillow）
+├── .gitignore           忽略本机配置、打包产物、缓存
+├── pet.example.json     配置模板（默认值，不含个人数据）
+├── pet.json             本机配置（首次运行自动生成，不入库）
 ├── ragdollpet\            代码
 │   ├── config.py         常量 / 台词 / 路径 / 配置(pet.json) / 空闲检测
 │   ├── assets.py         素材查找
 │   ├── frames.py         帧选择 / 缩放缓存 / 窗口遮罩 / 载入自动归一化
 │   ├── bubble.py         对话气泡
 │   ├── pet.py            主窗口（状态机、绘制、菜单、设置）
+│   ├── phase1.py         第一期纯逻辑（语录/提醒/免打扰/统计等）
+│   ├── weather.py        天气联网（免 Key）
+│   ├── platform_win.py   Windows 专属（快捷键/前台应用/开机自启）
+│   ├── settings_ui.py    统一设置窗口（6 个页签）
 │   └── app.py            单实例 + 入口
-├── pet.json              配置（可手工编辑、可直接备份）
-└── image\                图片
+├── image\                处理好的素材（600×600 透明 PNG，运行时用这套）
+├── source\               素材原图（2048px JPG，供 import_frames.py 处理）
+└── tests\                测试（`python -m unittest discover -s tests -v`）
 ```
 
+`desktop_pet_v2.1.py` 的文件名是历史名称（v2.1 时期的启动器），为避免破坏用户习惯和文档链接，整理时特意没有改名。
+
 配置从注册表搬到了 **`pet.json`**：第一次启动会把旧注册表里的值自动搬过来（搬完就在文件里，删了注册表也不影响）。想恢复默认，删掉 `pet.json` 重启即可。
+
+**首次运行的配置**：把 `pet.example.json` 复制为 `pet.json` 即可开始用（里面只有默认值，没有真实位置和纪念日）；不复制也能启动，程序会按默认值自动生成 `pet.json`。`pet.json` 是本机个人配置，已加入 `.gitignore`，不要提交进仓库。
+
+**素材分两套**：`source/` 是 2048px JPG 原图，`image/` 是 `import_frames.py` 处理后的 600×600 透明 PNG；运行时用 `image/`，换素材见下文“换素材 / 补帧导入”。
 
 ### 打包（PyInstaller）
 
 代码拆成包以后，`ragdollpet` 会被自动分析进去，只需要额外带 `image` 目录：
 
 ```powershell
-pyinstaller --noconsole --onefile --name RagdollPet ^
+pyinstaller --noconfirm --clean --onefile --noconsole --name LiuYi ^
+  --icon LiuYi.ico ^
   --add-data "image;image" ^
   desktop_pet_v2.1.py
 ```
 
-产物在 `dist\RagdollPet.exe`。想换图不重打包：把 PNG 放进 exe 同目录的 `image\` 即可。
+产物在 `dist\LiuYi.exe`。想换图不重打包：把 PNG 放进 exe 同目录的 `image\` 即可。
 
 
 ### 已打包好的 exe
 
-`D:\Download\六一桌宠\LiuYi.exe`（约 41 MB，单文件，双击即用）
+仓库里**不再放打包好的 `LiuYi.exe` / `LiuYi.zip`**（旧版约 41 MB / 52 MB，已从仓库删除，发布走 GitHub Releases）。需要 exe 时，在 Windows 上按上面“打包（PyInstaller）”的命令重新打包：
 
 - 图标：`LiuYi.ico`（由「猫和少女」那张图切成 16/24/32/48/64/128/256 七种尺寸）
 - 素材已打进 exe；**想换图不用重打包**——在 exe 同目录建个 `image\` 放同名 PNG 即可覆盖
-- 配置 `pet.json` 写在 **exe 同目录**（不是临时解包目录），换位置记得一起拷
-
-重新打包的命令：
-
-```powershell
-pyinstaller --noconfirm --clean --onefile --noconsole --name LiuYi ^
-  --icon "D:\Download\六一桌宠\LiuYi.ico" ^
-  --add-data "D:\Download\六一桌宠\image;image" ^
-  "D:\Download\六一桌宠\desktop_pet_v2.1.py"
-```
-
-### 打包成 exe
-
-```powershell
-pyinstaller --noconsole --onefile --name RagdollPet ^
-  --add-data "cat_idle.png;." --add-data "cat_sleep.png;." --add-data "cat_click.png;." ^
-  --add-data "cat_walk_a.png;." --add-data "cat_walk_b.png;." --add-data "cat_click.png;." ^
-  desktop_pet_v2.1.py
-```
-
-打完后把 PNG 放 exe 同目录也能覆盖内置图（优先读 exe 旁边的）。
+- 配置 `pet.json` 写在 **exe 同目录**（不是临时解包目录），换位置记得把 `pet.json` 一起拷过去（不要提交进仓库）
 
 ### 排错
 
@@ -298,7 +294,6 @@ pyinstaller --noconsole --onefile --name RagdollPet ^
 | 没有 `cat_pet.png` | 单击自动退回原来的"炸毛跳"，不报错 |
 
 - 优先级：`跳跃 > 被摸 > 睡觉 > 走路 > 待机`；被摸期间不会开始散步，睡着时会被自动清掉。
-- 11 项专项检查见 `petcheck_v21.py`（含"没有这张图时"的退化分支）。
 
 **这张是半身特写，和 idle 不同构图，所以单独处理**：按 idle 的**宽度** 475 缩放（头部约 1.3 倍，像凑近镜头），底部贴死画布下沿，胸口直接接到地面、不留悬空。最初按高度对齐试过，头会变成 2 倍大、脚底还浮起来 19px，已废弃。底部 24px 做了 alpha 渐隐，落在地面线上不会出现一条硬切口。
 
@@ -330,20 +325,17 @@ pyinstaller --noconsole --onefile --name RagdollPet ^
 | 空闲 CPU（清醒+呼吸） | — | 0.69% |
 | 浅睡 / 深睡 CPU | — | 0.00% |
 
-## 自测脚本
+## 测试
 
-以下是历史开发记录：除 `import_frames.py` 外，下列专项脚本未随当前仓库提供。当前可直接运行的导入测试见上文。
+当前可直接运行的测试：
 
 ```powershell
-python regress_v21.py      # 13 项回归（动画开关/睡眠/唤醒/缓存/位置校正）
-python walkcheck_v21.py    # 步态帧: 帧名/朝向/mask/基线 + 出图
-python bench_v21.py        # v2.0 对照: 耗时、Zzz、跳跃裁剪、交互
-python soak_v21.py         # 10 秒真实事件循环
-python selftest_v21.py     # 真实 main() 4 秒 + 单实例
-python realscreen_v21.py   # 真窗口 + Win32 API 验证（会显示窗口几秒）
-python realwalk_v21.py     # 真机走一段并连拍（窗口显示约 3 秒）
-python import_frames.py --out walk_test --fit per-frame # 当前可用的导入 / 基线对齐工具
+python -m unittest discover -s tests -v
 ```
+
+（44 项：6 项补帧导入 + 28 项第一期纯逻辑 + 10 项离屏 GUI 集成。Linux 下 10 项离屏 GUI 测试会因缺 PyQt5 被跳过，如实报告即可。）
+
+历史开发记录里的专项脚本（`petcheck_v21.py`、`regress_v21.py`、`walkcheck_v21.py`、`bench_v21.py`、`soak_v21.py`、`selftest_v21.py`、`realscreen_v21.py`、`realwalk_v21.py`）未随当前仓库提供，本次整理已移除对它们的引用；如需恢复，请从 git 历史里找。
 
 ## 还没解决的
 
@@ -366,17 +358,17 @@ python import_frames.py --out walk_test --fit per-frame # 当前可用的导入 
 ### 还不够好的地方
 
 - **素材是短板，不是代码**：这轮 4 帧走位卡在"拼图里猫和隔壁尾巴粘连"，说明生成工作流不稳定——单帧一次出（像最早那 3 帧）比一张拼图稳得多。
-- **单文件 1362 行**已经不是小脚本了。按职责拆 `config / assets / bubble / pet / frames` 更好维护，但单文件"复制一个 .py 就能跑"是真实收益，算取舍。
+- v2.2 起代码已拆进 `ragdollpet/` 包（`config / assets / bubble / pet / frames` 等），单文件时代已结束；想加功能按模块改，别再往一个文件里堆。
 - **帧动画的物理感弱**：走路匀速平移，没有起步/停下缓动、没有身体起伏。加个 `QEasingCurve` 包络能明显改善。
 - **资源路径有三处候选**（exe 旁 / 脚本目录 / assets / cwd），"找不到图为啥"不好查，理想是启动时打一条解析日志。
-- **配置全在注册表**：换机器/备份要导出注册表，不如一个 JSON。
+- **配置已是 JSON**：`pet.json` 在程序目录，备份只拷一个文件；但它是个人配置，已加入 `.gitignore`，别提交进仓库。
 - **测试是脚本不是 CI**：得手动跑，没有 pytest 化。
 
 ### 一句话
 
 **从"能跑的玩具"变成了"能长期挂着、坏了知道去哪查"的工具。** 代码层面该填的坑基本填完了，现在瓶颈在素材（帧数和一致性），不在实现。真要再往前一步，优先级是：**稳定的 4–6 帧素材 > 走路缓动 > 拆模块**。
 
-### 数字备忘
+### 数字备忘（v2.1.1 时期的记录，仅供参考；v2.2 + 第一期后代码已拆进 `ragdollpet/`，见“目录结构”）
 
 | 项 | 值 |
 |---|---|

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+*.exe
+*.zip
+
+# Local user config (personal settings, position, anniversaries)
+# First run: copy pet.example.json to pet.json, or let the app generate it.
+pet.json
+pet.json.tmp
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
