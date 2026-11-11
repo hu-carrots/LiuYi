@@ -1,0 +1,92 @@
+{
+  "scale_val": 1.0,
+  "ontop": true,
+  "water_on": true,
+  "water_min": 45,
+  "sleep_min": 5,
+  "deep_sleep_min": 10,
+  "anim_on": true,
+  "power_saver": false,
+  "high_dpi": true,
+  "anni_name": "",
+  "anni_date": "",
+  "last_anni_shown": "",
+  "pos_x": -99999,
+  "pos_y": -99999,
+  "speech_tier": "normal",
+  "speech_categories": {
+    "idle": true,
+    "pet": true,
+    "drag": true,
+    "back": true,
+    "water": true,
+    "feed": true,
+    "sleep": true,
+    "anni": true,
+    "hotkey": true
+  },
+  "mode": "free",
+  "window_layer": "top",
+  "opacity": 1.0,
+  "locked": false,
+  "click_through": false,
+  "autostart": false,
+  "size_preset": "",
+  "reminders": [
+    {
+      "id": "default-bedtime",
+      "kind": "daily",
+      "time": "23:30",
+      "text": "都 23:30 啦，该睡了哦～明天也要元气满满",
+      "enabled": true,
+      "last_fired": ""
+    }
+  ],
+  "dnd_default_min": 30,
+  "weather_on": true,
+  "weather_city": "上海",
+  "app_watch": [
+    {
+      "app": "Steam.exe",
+      "minutes": 60,
+      "enabled": true
+    },
+    {
+      "app": "WeGame.exe",
+      "minutes": 60,
+      "enabled": true
+    },
+    {
+      "app": "Code.exe",
+      "minutes": 90,
+      "enabled": true
+    }
+  ],
+  "app_launch_on": true,
+  "hotkeys": [
+    {
+      "key": "Ctrl+Alt+1",
+      "kind": "praise",
+      "text": "",
+      "enabled": true
+    },
+    {
+      "key": "Ctrl+Alt+2",
+      "kind": "comfort",
+      "text": "",
+      "enabled": true
+    },
+    {
+      "key": "Ctrl+Alt+3",
+      "kind": "tease",
+      "text": "",
+      "enabled": true
+    }
+  ],
+  "stats_date": "",
+  "stat_clicks": 0,
+  "stat_walks": 0,
+  "stat_reminders": 0,
+  "stat_feeds": 0,
+  "stat_wakes": 0
+}
