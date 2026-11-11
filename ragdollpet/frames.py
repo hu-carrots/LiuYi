@@ -85,7 +85,9 @@ class FrameMixin:
 
     def _frame(self):
         """当前应绘制的帧: (名字, QPixmap|None)。
-        优先级: 被拎起 > 跳跃/炸毛 > 吃东西 > 伸懒腰/打哈欠 > 被摸 > 睡觉 > 走路 > 闭眼 > 待机。"""
+        优先级: 被拎起 > 跳跃/炸毛 > 吃东西 > 伸懒腰/打哈欠 > 被摸 > 睡觉(含呼吸帧) > 走路 > 闭眼 > 待机(含呼吸帧)。
+        呼吸循环下标 0 是基础帧, 名字保持 "idle"/"sleep" 不变, 只有吸气/呼气才带 breath 后缀 ——
+        这样图缺了、动画关了, 帧名和原来一模一样, 老测试和 mask 缓存都不受影响。"""
         # 拖动中: 整只猫被拎起来, 优先级最高
         if self._holding and self.pix_hold is not None:
             if self.facing < 0 and self.pix_hold_l is not None:
@@ -115,6 +117,14 @@ class FrameMixin:
                 return "pet_l", self.pix_pet_l
             return "pet", self.pix_pet
         if self.state in ("sleep", "deep_sleep"):
+            # 睡觉呼吸: 睡觉图 → 吸气 → 呼气 → 睡觉图; 图缺了池子里只剩基础帧,
+            # 下面 len(pool) > 1 不成立, 走老路回 "sleep", 不循环也不崩。
+            pool = self._breath_pool()
+            if len(pool) > 1 and self.anim_enabled and not self.power_saver:
+                idx = self._breath_index % len(pool)
+                if idx == 0:
+                    return ("sleep", pool[0])
+                return (f"sleep_breath_{idx}", pool[idx])
             pm = self.pix_sleep or self.pix_idle
             return ("sleep", pm) if pm is not None else ("none", None)
         if self.state == "walk":
@@ -130,6 +140,17 @@ class FrameMixin:
                 return "blink_l", self.pix_blink_l
             if self.pix_blink is not None:
                 return "blink", self.pix_blink
+        # 待机呼吸: 待机图 → 吸气 → 呼气 → 待机图; 放在眨眼之后, 眨眼仍能盖住呼吸帧。
+        # 图缺了 / 动画关了 / 省电时池子里只剩基础帧, 走老路回 "idle"/"idle_l"。
+        if self.anim_enabled and not self.power_saver:
+            pool = self._breath_pool()
+            if len(pool) > 1:
+                idx = self._breath_index % len(pool)
+                if idx == 0:
+                    if self.facing < 0 and self.pix_idle_left is not None:
+                        return "idle_l", pool[0]
+                    return "idle", pool[0]
+                return (f"idle_breath{'_l' if self.facing < 0 else ''}_{idx}", pool[idx])
         if self.facing < 0 and self.pix_idle_left is not None:
             return "idle_l", self.pix_idle_left
         return ("idle", self.pix_idle) if self.pix_idle is not None else ("none", None)

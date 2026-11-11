@@ -106,6 +106,35 @@ def pick_idle_action(roll) -> str:
         return "stretch"
 
 
+# ================================ 呼吸帧: 待机 / 睡觉 =================
+# 待机循环 cat_idle → 吸气 → 呼气 → 待机; 睡觉循环 cat_sleep → 吸气 → 呼气 → 睡觉,
+# 每帧 BREATH_MS 毫秒。循环下标和推进守卫放这里(纯函数, 可单元测试);
+# 具体哪张图由 pet.py 按状态挑, 图缺了池子里只剩基础帧, 自然降级不循环。
+
+def next_breath_index(index, pool_len) -> int:
+    """呼吸循环下标 +1: 池子长度 <=1 时永远停在 0(只有基础帧, 不循环)。"""
+    try:
+        pool_len = int(pool_len)
+        index = int(index)
+    except (TypeError, ValueError):
+        return 0
+    if pool_len <= 1:
+        return 0
+    return (index + 1) % pool_len
+
+
+def should_advance_breath(state, anim_enabled, power_saver, eating,
+                          doing_action, petting, holding, jumping) -> bool:
+    """呼吸帧该不该推进: 只在待机/睡觉且什么都没做、动画开着时才推进。"""
+    if state not in ("idle", "sleep", "deep_sleep"):
+        return False
+    if not anim_enabled or power_saver:
+        return False
+    if eating or doing_action or petting or holding or jumping:
+        return False
+    return True
+
+
 # ================================ 模式 / 窗口 ================================
 MODES = ("free", "follow", "stay")
 MODE_NAMES = {"free": "自由散步", "follow": "跟随鼠标", "stay": "原地待着"}
