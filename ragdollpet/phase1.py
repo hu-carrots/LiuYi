@@ -73,6 +73,39 @@ def category_enabled(categories, category: str) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+# ================================ 新动作: 伸懒腰 / 打哈欠 =================
+# 待机随机触发的节流: 上次动作后至少隔 5 分钟, 且本次待机超过 90 秒,
+# 每个 1 秒 tick 里只有小概率触发, 不会刚待机就连着伸懒腰打哈欠。
+# roll 由调用方传 random.random(), 这样逻辑可单元测试(不依赖随机种子)。
+IDLE_ACTION_MIN_GAP_SEC = 300    # 上次伸懒腰/打哈欠后至少隔这么久
+IDLE_ACTION_MIN_IDLE_SEC = 90    # 本次待机(无交互)超过这么久才考虑触发
+IDLE_ACTION_CHANCE = 0.08        # 每秒 tick 的触发概率(约每 12 秒一次期望, 但被上面两道门拦着)
+WAKE_STRETCH_CHANCE = 0.35      # 深睡醒来时伸懒腰的概率(照抄 LINES_BACK 的 35% 写法)
+
+
+def should_trigger_idle_action(idle_seconds, since_last_action_seconds, roll) -> bool:
+    """待机随机动作该不该触发: 两道时间门都过, 再看 roll 是否小于概率。"""
+    try:
+        idle_seconds = float(idle_seconds)
+        since_last_action_seconds = float(since_last_action_seconds)
+        roll = float(roll)
+    except (TypeError, ValueError):
+        return False
+    if idle_seconds < IDLE_ACTION_MIN_IDLE_SEC:
+        return False
+    if since_last_action_seconds < IDLE_ACTION_MIN_GAP_SEC:
+        return False
+    return roll < IDLE_ACTION_CHANCE
+
+
+def pick_idle_action(roll) -> str:
+    """待机随机动作二选一: roll < 0.5 伸懒腰, 否则打哈欠。"""
+    try:
+        return "stretch" if float(roll) < 0.5 else "yawn"
+    except (TypeError, ValueError):
+        return "stretch"
+
+
 # ================================ 模式 / 窗口 ================================
 MODES = ("free", "follow", "stay")
 MODE_NAMES = {"free": "自由散步", "follow": "跟随鼠标", "stay": "原地待着"}

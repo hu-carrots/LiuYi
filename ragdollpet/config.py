@@ -27,6 +27,9 @@ IMG_HOLD = "cat_hold.png"        # 可选: 被拎起(拖动时用); 没有就保
 IMG_TRAY = "tray_icon.png"       # 可选: 托盘图标; 没有就用 idle 图当图标
 IMG_EAT = ["cat_eat.png", "cat_eat2.png"]   # 可选: 吃零食两帧(张嘴/闭嘴)
 EAT_MS = 180                     # 咀嚼每帧停留(毫秒)
+IMG_STRETCH = ["cat_stretch_1.png", "cat_stretch_2.png"]  # 可选: 伸懒腰两帧(蹲着准备/前爪前伸)
+IMG_YAWN = ["cat_yawn_1.png", "cat_yawn_2.png"]          # 可选: 打哈欠两帧(小口微张/大口捂嘴)
+ACTION_MS = 450                  # 伸懒腰/打哈欠每帧停留(毫秒), 两帧各播两轮约 1.8 秒
 
 BASE_H = 220            # 1.0x 时猫的显示高度(逻辑像素)
 TOP_MARGIN = 64         # 窗口顶部留白, 必须 > JUMP_HEIGHT
@@ -166,6 +169,20 @@ LINES_TEASE = [
 LINES_DRAG = [
     "呀，轻点轻点，我要晕啦",
     "放我下来嘛～不过被拎着也挺好玩的",
+]
+# 新动作台词(人设不变: 还是六一那只撒娇布偶猫, 别写成鲸鱼口吻)
+# _say 时复用 category="idle", 走现有语录频率/类别开关, 不新增 pet.json 键
+LINES_STRETCH = [
+    "呜～伸个大懒腰，骨头都舒展开啦",
+    "前爪伸直、屁股翘高，舒服～",
+    "刚睡醒，伸个懒腰再陪你",
+    "喵呜～懒腰伸完，满血复活啦",
+]
+LINES_YAWN = [
+    "(打了个大大的哈欠)好困呀…",
+    "哈～欠，眼睛都睁不开了",
+    "困困的…再眯一小会儿好不好嘛",
+    "(张大嘴打哈欠)今天也辛苦啦",
 ]
 # 应用启动台词用 {app} 占位, 运行时替换成应用名
 LINES_LAUNCH = [
