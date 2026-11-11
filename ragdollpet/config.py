@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """常量、台词库、路径、配置存储(JSON)、系统空闲检测。"""
 
+import copy
 import ctypes
 import json
 import os
@@ -43,6 +44,8 @@ INSTANCE_MUTEX = "Local\\RagdollPet.DesktopPet.v21"   # 内核互斥体, 不占�
 INSTANCE_TITLE = "RagdollPet-DesktopPet"              # 供第二个实例 FindWindow 定位
 
 # 键名与 v2.0 保持一致, 老配置可直接沿用
+# 第一期新增键(2026-11-11): 旧 pet.json 里没有这些键时自动补默认值,
+# 已有配置不受影响。嵌套的 list/dict 默认值用 deepcopy, 别共用同一份。
 DEFAULTS = {
     "scale_val": 1.0,
     "ontop": True,
@@ -58,6 +61,51 @@ DEFAULTS = {
     "last_anni_shown": "",
     "pos_x": -99999,
     "pos_y": -99999,
+    # --- 第一期: 语录 ---
+    "speech_tier": "normal",            # quiet/normal/chatty/talkative
+    "speech_categories": {              # 各类别开关, 缺类默认开
+        "idle": True, "pet": True, "drag": True, "back": True,
+        "water": True, "feed": True, "sleep": True, "anni": True,
+        "hotkey": True,
+    },
+    # --- 第一期: 模式与窗口 ---
+    "mode": "free",                     # free 自由散步 / follow 跟随鼠标 / stay 原地待着
+    "window_layer": "top",              # top 置顶 / normal 普通 / bottom 置底
+    "opacity": 1.0,                     # 0.2~1.0
+    "locked": False,                    # 锁定位置(拖不动, 点/右键照旧)
+    "click_through": False,             # 鼠标穿透(点不中猫, 从托盘解除)
+    "autostart": False,                 # 开机自启(仅 Windows)
+    "size_preset": "",                  # 大小档位名, 空 = 滚轮自定义
+    # --- 第一期: 定时提醒 ---
+    "reminders": [                      # 每天 23:30 该睡了(默认一条)
+        {"id": "default-bedtime", "kind": "daily", "time": "23:30",
+         "text": "都 23:30 啦，该睡了哦～明天也要元气满满",
+         "enabled": True, "last_fired": ""},
+    ],
+    "dnd_default_min": 30,              # 免打扰默认时长(分钟)
+    # --- 第一期: 天气(免 Key) ---
+    "weather_on": True,
+    "weather_city": "上海",
+    # --- 第一期: 应用联动 ---
+    "app_watch": [                      # 应用使用时长提醒
+        {"app": "Steam.exe", "minutes": 60, "enabled": True},
+        {"app": "WeGame.exe", "minutes": 60, "enabled": True},
+        {"app": "Code.exe", "minutes": 90, "enabled": True},
+    ],
+    "app_launch_on": True,              # 应用启动时说一句
+    # --- 第一期: 全局快捷键 ---
+    "hotkeys": [
+        {"key": "Ctrl+Alt+1", "kind": "praise", "text": "", "enabled": True},
+        {"key": "Ctrl+Alt+2", "kind": "comfort", "text": "", "enabled": True},
+        {"key": "Ctrl+Alt+3", "kind": "tease", "text": "", "enabled": True},
+    ],
+    # --- 第一期: 今日汇总(本地计数, 没有余额) ---
+    "stats_date": "",
+    "stat_clicks": 0,
+    "stat_walks": 0,
+    "stat_reminders": 0,
+    "stat_feeds": 0,
+    "stat_wakes": 0,
 }
 
 
@@ -99,6 +147,31 @@ LINES_BACK = [
     "你终于回来啦，我等你好久好久了",
     "回来啦？我还以为你把我忘在这儿了",
 ]
+# 第一期新增台词(人设不变: 还是六一那只撒娇布偶猫, 别写成鲸鱼口吻)
+LINES_PRAISE = [
+    "你超棒的！今天也闪闪发光～",
+    "嘿嘿，我就知道你能行",
+    "主人最厉害啦，奖励一个蹭蹭",
+]
+LINES_COMFORT = [
+    "没事没事，我在这儿陪着你呢",
+    "累了就歇会儿，我趴在旁边等你",
+    "抱抱～明天会更好的",
+]
+LINES_TEASE = [
+    "哼，就知道你会来点我",
+    "又在摸鱼了吧，我都看见啦",
+    "再点我就要收费了哦，一根小鱼干一次",
+]
+LINES_DRAG = [
+    "呀，轻点轻点，我要晕啦",
+    "放我下来嘛～不过被拎着也挺好玩的",
+]
+# 应用启动台词用 {app} 占位, 运行时替换成应用名
+LINES_LAUNCH = [
+    "你打开 {app} 啦，我陪你一起",
+    "{app} 启动了哦，加油",
+]
 
 
 
@@ -133,7 +206,9 @@ class Store:
     def __init__(self, qsettings: QSettings = None):
         self._legacy = qsettings or QSettings("RagdollPet", "DesktopPet")
         self.path = self._json_path(qsettings)
-        self.data = dict(DEFAULTS)
+        # deepcopy: 嵌套的 list/dict 默认值(提醒/快捷键/应用列表)不能共用同一份,
+        # 否则一个 Store 改了会污染 DEFAULTS, 下一个实例跟着变。
+        self.data = copy.deepcopy(DEFAULTS)
         self._load()
 
     @staticmethod
@@ -205,6 +280,20 @@ class Store:
     def get_str(self, key):
         value = self.raw(key)
         return "" if value is None else str(value)
+
+    def get_list(self, key):
+        """取列表配置: 返回深拷贝, 调用方改了不会污染 Store; 类型不对回默认值。"""
+        value = self.raw(key)
+        if isinstance(value, list):
+            return copy.deepcopy(value)
+        return copy.deepcopy(DEFAULTS.get(key, []))
+
+    def get_dict(self, key):
+        """取字典配置: 返回深拷贝, 类型不对回默认值。"""
+        value = self.raw(key)
+        if isinstance(value, dict):
+            return copy.deepcopy(value)
+        return copy.deepcopy(DEFAULTS.get(key, {}))
 
     def set(self, key, value):
         self.data[key] = value
