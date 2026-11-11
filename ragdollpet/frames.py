@@ -85,7 +85,7 @@ class FrameMixin:
 
     def _frame(self):
         """当前应绘制的帧: (名字, QPixmap|None)。
-        优先级: 被拎起 > 跳跃/炸毛 > 吃东西 > 被摸 > 睡觉 > 走路 > 闭眼 > 待机。"""
+        优先级: 被拎起 > 跳跃/炸毛 > 吃东西 > 伸懒腰/打哈欠 > 被摸 > 睡觉 > 走路 > 闭眼 > 待机。"""
         # 拖动中: 整只猫被拎起来, 优先级最高
         if self._holding and self.pix_hold is not None:
             if self.facing < 0 and self.pix_hold_l is not None:
@@ -98,6 +98,18 @@ class FrameMixin:
             pool = self.pix_eat if self.facing >= 0 else (self.pix_eat_l or self.pix_eat)
             idx = self._eat_index % len(pool)
             return (f"eat{'_l' if self.facing < 0 else ''}_{idx}", pool[idx])
+        # 新动作: 伸懒腰 / 打哈欠, 各两帧循环; 名字带动作名+序号+朝向,
+        # mask 缓存按名字索引, 翻转后要拿到翻转过的遮罩。
+        # 注意放被摸之前、睡觉之前: 睡前打哈欠时状态还是 idle, 靠这里盖住待机帧;
+        # 而真正睡着后 _set_state 会停掉动作, 睡觉帧才接管。
+        if self._action_kind == "stretch" and self.pix_stretch:
+            pool = self.pix_stretch if self.facing >= 0 else (self.pix_stretch_l or self.pix_stretch)
+            idx = self._action_index % len(pool)
+            return (f"stretch{'_l' if self.facing < 0 else ''}_{idx}", pool[idx])
+        if self._action_kind == "yawn" and self.pix_yawn:
+            pool = self.pix_yawn if self.facing >= 0 else (self.pix_yawn_l or self.pix_yawn)
+            idx = self._action_index % len(pool)
+            return (f"yawn{'_l' if self.facing < 0 else ''}_{idx}", pool[idx])
         if self._petting and self.pix_pet is not None:
             if self.facing < 0 and self.pix_pet_l is not None:
                 return "pet_l", self.pix_pet_l

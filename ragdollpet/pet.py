@@ -69,18 +69,21 @@ from PyQt5.QtWidgets import (
 from .assets import resource_path
 from .bubble import SpeechBubble
 from .config import (
-    BASE_H, BLINK_RATIO, BUBBLE_GAP, DOUBLE_CLICK_SEC, FRAME_MS, IMG_BLINK, IMG_CLICK,
-    IMG_IDLE, IMG_PET, IMG_SLEEP, IMG_WALK_LEGACY, IMG_WALK_SEQ, INSTANCE_TITLE,
+    ACTION_MS, BASE_H, BLINK_RATIO, BUBBLE_GAP, DOUBLE_CLICK_SEC, FRAME_MS,
+    IMG_BLINK, IMG_CLICK, IMG_IDLE, IMG_PET, IMG_SLEEP, IMG_STRETCH, IMG_WALK_LEGACY,
+    IMG_WALK_SEQ, IMG_YAWN, INSTANCE_TITLE,
     EAT_MS, IMG_EAT, IMG_HOLD, JUMP_HEIGHT, LINES_ANGRY, LINES_BACK, LINES_CLICK,
     LINES_COMFORT, LINES_DRAG, LINES_FEED, LINES_IDLE, LINES_LAUNCH, LINES_PRAISE,
-    LINES_SLEEP, LINES_TEASE, LOGIC_MS, MASK_INFLATE, PET_MS, PET_NAME, SCALE_MAX,
-    SCALE_MIN, TOP_MARGIN, Store, app_dir, get_global_idle_seconds,
+    LINES_SLEEP, LINES_STRETCH, LINES_TEASE, LINES_YAWN, LOGIC_MS, MASK_INFLATE,
+    PET_MS, PET_NAME, SCALE_MAX, SCALE_MIN, TOP_MARGIN, Store, app_dir,
+    get_global_idle_seconds,
 )
 from .frames import FrameMixin
 from .phase1 import (
-    LAYERS, MODES, SIZE_PRESETS, AppUsageTracker, DailyStats, DndQueue,
-    category_enabled, clamp_opacity, default_reminders, due_reminders,
-    format_weather_line, next_idle_interval, parse_reminder, snap_position,
+    LAYERS, MODES, SIZE_PRESETS, WAKE_STRETCH_CHANCE, AppUsageTracker, DailyStats,
+    DndQueue, category_enabled, clamp_opacity, default_reminders, due_reminders,
+    format_weather_line, next_idle_interval, parse_reminder, pick_idle_action,
+    should_trigger_idle_action, snap_position,
 )
 from . import platform_win
 from .weather import WeatherError, fetch_weather
@@ -243,6 +246,9 @@ class DesktopPet(FrameMixin, QWidget):
         # ---------- 吃东西动画(张嘴/闭嘴) ----------
         self._eat_timer = QTimer(self, timeout=self._on_eat_tick)
 
+        # ---------- 新动作动画(伸懒腰/打哈欠, 各两帧循环, 共用一个定时器) ----------
+        self._action_timer = QTimer(self, timeout=self._on_action_tick)
+
         # ---------- 资源 ----------
         self.pix_idle = self._load_image(IMG_IDLE)
         self.pix_sleep = self._load_image(IMG_SLEEP)
@@ -273,6 +279,18 @@ class DesktopPet(FrameMixin, QWidget):
         self._eating = False
         self._eat_index = 0
         self._eat_left = 0
+        # 新动作(可选): 伸懒腰/打哈欠各两帧循环; 图缺了就降级(不触发、不崩)
+        self.pix_stretch = [pm for pm in (self._load_image(n) for n in IMG_STRETCH)
+                            if pm is not None and not pm.isNull()]
+        self.pix_stretch_l = [p for p in (self._flipped(pm) for pm in self.pix_stretch) if p]
+        self.pix_yawn = [pm for pm in (self._load_image(n) for n in IMG_YAWN)
+                         if pm is not None and not pm.isNull()]
+        self.pix_yawn_l = [p for p in (self._flipped(pm) for pm in self.pix_yawn) if p]
+        self._action_kind = None       # None / "stretch" / "yawn": 当前在做哪个新动作
+        self._action_index = 0
+        self._action_left = 0
+        self._last_action_at = time.monotonic()   # 上次新动作开始时间(待机随机触发的节流用)
+        self._pending_sleep = False    # 睡前打哈欠进行中: 哈欠完再真正进 sleep
         self._petting = False
         self._last_click_at = 0.0
         self._missing_assets = self.pix_idle is None
@@ -416,6 +434,8 @@ class DesktopPet(FrameMixin, QWidget):
             self.tail_dx = 0
             self.zzz_phase = 0.0
             self._stop_walk()
+            self._stop_action()            # 睡着就别继续伸懒腰/打哈欠了, 睡觉帧接管
+            self._pending_sleep = False    # 深睡抢在睡前哈欠前面时也清掉, 别残留
             self._petting = False          # 睡着就别继续眯眼蹭头了
             self._pet_timer.stop()
         self._apply_opacity()              # 深睡半透明按“设置值与 0.55 取小”算
@@ -425,6 +445,39 @@ class DesktopPet(FrameMixin, QWidget):
         self.update()
 
     def _enter_sleep(self):
+        """进浅睡: 有打哈欠图且动画开着时, 先打一个哈欠、约 1.2 秒后再真正睡。
+
+        图缺失 / 动画关了 / 省电 / 正在吃东西或做动作时直接睡, 不崩。
+        _on_logic 每秒都会调这里, _pending_sleep 守着不重复开哈欠。
+        """
+        if self._sleeping() or self._pending_sleep:
+            return
+        if (self.pix_yawn and self.anim_enabled and not self.power_saver
+                and not self._eating and not self._doing_action()):
+            self._pending_sleep = True
+            self._start_yawn(rounds=1)
+            QTimer.singleShot(1200, self._finish_pending_sleep)
+            return
+        self._do_enter_sleep()
+
+    def _finish_pending_sleep(self):
+        """睡前哈欠的收尾: 1.2 秒到了, 没被摸过才真的睡; 期间被摸过就留在待机。
+
+        先清 _pending_sleep 再判断: 哈欠这 1.2 秒里可能被全局空闲判定抢先
+        推进深睡(_set_state 会停动作), 那时也不能让标志残留, 否则醒来后
+        _enter_sleep 会被永久拦住。
+        """
+        if not self._pending_sleep:
+            return
+        self._pending_sleep = False
+        if self._sleeping():
+            return
+        if time.monotonic() - self.last_interact < self.sleep_minutes * 60:
+            return
+        self._stop_action()
+        self._do_enter_sleep()
+
+    def _do_enter_sleep(self):
         if self._sleeping():
             return
         self._set_state("sleep")
@@ -444,8 +497,15 @@ class DesktopPet(FrameMixin, QWidget):
         self._set_state("idle")
         self._bump_stat("wakes")
         self._schedule_walk(60, 120)          # 睡醒后继续安排散步(修复卡住不走的 bug)
-        if by_input and was_deep and random.random() < 0.35:
-            self._say(self._pick(LINES_BACK), category="back")
+        if by_input and was_deep:
+            # 深睡醒来: 35% 伸懒腰, 35% 说回来了, 30% 什么也不说 ——
+            # 一次只抽一个, 伸懒腰和 BACK 台词不同时出现。
+            roll = random.random()
+            if roll < WAKE_STRETCH_CHANCE:
+                if not self._start_stretch():
+                    self._say(self._pick(LINES_BACK), category="back")
+            elif roll < WAKE_STRETCH_CHANCE + 0.35:
+                self._say(self._pick(LINES_BACK), category="back")
         if self._water_pending:
             self._water_pending = False
             QTimer.singleShot(1500, lambda: self._say("对啦, 刚才叫你喝水来着～现在去倒杯水吧", category="water"))
@@ -470,6 +530,9 @@ class DesktopPet(FrameMixin, QWidget):
                 # 用单调时钟算间隔: 系统时间被 NTP 校准/手动改时不会误判
                 if time.monotonic() - self.last_interact >= self.sleep_minutes * 60:
                     self._enter_sleep()
+            # 待机久了随机伸懒腰/打哈欠(节流 + 互斥都在 _maybe_idle_action 里)
+            if not self._sleeping() and not self._jumping:
+                self._maybe_idle_action()
             # 分辨率变化 / 拔掉副屏 / 任务栏挪位后, 别把猫留在屏幕外
             if not self._visible_somewhere(self.pos()):
                 self.move(self._clamp_pos(self.pos()))
@@ -530,6 +593,7 @@ class DesktopPet(FrameMixin, QWidget):
             self.blink = False
             self.tail_dx = 0
             self._stop_walk()
+            self._stop_action()            # 关动画/省电: 伸懒腰/打哈欠做到一半也要停, 别卡住
         self.breath_group.stop()
         self._dy = 0
         self._relayout()
@@ -563,6 +627,7 @@ class DesktopPet(FrameMixin, QWidget):
         if self.mode != "free":
             return
         if (self._sleeping() or self._jumping or self._petting
+                or self._doing_action()
                 or self.power_saver or not self.anim_enabled):
             self._schedule_walk(30, 60)
             return
@@ -1266,6 +1331,15 @@ class DesktopPet(FrameMixin, QWidget):
         act_feed.triggered.connect(self._feed)
         menu.addAction(act_feed)
 
+        # ---- 新动作: 手动入口(图缺了就禁用, 做动作/吃东西时也禁用) ----
+        self._act_stretch = QAction("伸个懒腰", menu)
+        self._act_stretch.triggered.connect(self._manual_stretch)
+        menu.addAction(self._act_stretch)
+
+        self._act_yawn = QAction("打个哈欠", menu)
+        self._act_yawn.triggered.connect(self._manual_yawn)
+        menu.addAction(self._act_yawn)
+
         menu.addSeparator()
         act_quit = QAction("退出", menu)
         act_quit.triggered.connect(self.shutdown)
@@ -1289,6 +1363,10 @@ class DesktopPet(FrameMixin, QWidget):
             act.setChecked(name == self.size_preset)
         for key, act in self._layer_actions.items():
             act.setChecked(key == self.window_layer)
+        # 新动作入口: 图缺了 / 正在吃东西或做动作时禁用, 点了也不会重复触发
+        busy = self._eating or self._doing_action()
+        self._act_stretch.setEnabled(bool(self.pix_stretch) and not busy)
+        self._act_yawn.setEnabled(bool(self.pix_yawn) and not busy)
         self._menu.exec_(global_pos)
 
     # ---- 第一期: 菜单里的小开关 ----
@@ -1340,6 +1418,8 @@ class DesktopPet(FrameMixin, QWidget):
         """喂零食: 张嘴/闭嘴两帧循环 rounds 轮, 约 0.7 秒后回待机。"""
         if not self.pix_eat:
             return
+        if self._doing_action():           # 正在伸懒腰/打哈欠时不抢着吃
+            return
         self._eating = True
         self._eat_index = 0
         self._eat_left = max(2, rounds * len(self.pix_eat))
@@ -1365,6 +1445,115 @@ class DesktopPet(FrameMixin, QWidget):
             self.update()
         except Exception:
             self._log_error("eat")
+
+    # ------------------------------------------------- 新动作: 伸懒腰 / 打哈欠
+    def _doing_action(self) -> bool:
+        """正在做伸懒腰或打哈欠(共用一个定时器, 同一时间只可能做一个)。"""
+        return getattr(self, "_action_kind", None) is not None
+
+    def _stop_action(self):
+        """停掉新动作并清状态: 入睡/关动画/省电/重置/退出时调用, 别卡住。"""
+        timer = getattr(self, "_action_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._action_kind = None
+        self._action_index = 0
+        self._action_left = 0
+
+    def _start_action(self, kind: str, lines, rounds: int = 2) -> bool:
+        """新动作的通用入口, 仿照 _start_eat: 两帧循环 rounds 轮后回待机。
+
+        返回 False 表示没做成(图缺失 / 正在吃东西或做别的动作 / 睡觉 /
+        跳跃 / 被摸 / 被拎起 / 拖拽 / 动画关了 / 省电 / 不在待机状态),
+        调用方据此决定要不要说兜底台词, 不要在图缺时崩。
+        """
+        pool = self.pix_stretch if kind == "stretch" else self.pix_yawn
+        if not pool:
+            return False
+        if (self._eating or self._doing_action() or self._sleeping()
+                or self._jumping or self._petting or self._holding or self._dragging
+                or not self.anim_enabled or self.power_saver or self.state != "idle"):
+            return False
+        self._action_kind = kind
+        self._action_index = 0
+        self._action_left = max(2, rounds * len(pool))
+        self._last_action_at = time.monotonic()
+        self._relayout()
+        self._rebuild_mask()
+        self.update()
+        self._action_timer.start(ACTION_MS)
+        if lines:
+            self._say(self._pick(lines), category="idle")
+        return True
+
+    def _start_stretch(self, rounds: int = 2) -> bool:
+        """伸懒腰: 蹲着准备 -> 前爪前伸, 各播 rounds 轮。"""
+        return self._start_action("stretch", LINES_STRETCH, rounds)
+
+    def _start_yawn(self, rounds: int = 2) -> bool:
+        """打哈欠: 小口微张 -> 大口捂嘴, 各播 rounds 轮。"""
+        return self._start_action("yawn", LINES_YAWN, rounds)
+
+    def _on_action_tick(self):
+        """新动作的帧推进, 仿照 _on_eat_tick: 播完回待机并重建 mask。"""
+        try:
+            self._action_left -= 1
+            if self._action_left <= 0:
+                self._action_timer.stop()
+                self._action_kind = None
+                self._action_index = 0
+                self._relayout()
+                self._rebuild_mask()
+                self.update()
+                return
+            self._action_index += 1
+            self._relayout()
+            self._rebuild_mask()
+            self.update()
+        except Exception:
+            self._log_error("action")
+
+    def _maybe_idle_action(self):
+        """待机随机动作: 仅 state==idle 且什么都没在做时才考虑触发。
+
+        节流与概率判断在 phase1.should_trigger_idle_action 里(纯函数,
+        可单元测试); 这里只做状态守卫和二选一, 选中的动作图缺了就换另一个。
+        """
+        if (self.state != "idle" or self._eating or self._doing_action()
+                or self._petting or self._holding or self._dragging
+                or self._pending_sleep):
+            return
+        if not self.anim_enabled or self.power_saver:
+            return
+        if not self.pix_stretch and not self.pix_yawn:
+            return
+        idle_for = time.monotonic() - self.last_interact
+        since_action = time.monotonic() - self._last_action_at
+        if not should_trigger_idle_action(idle_for, since_action, random.random()):
+            return
+        kind = pick_idle_action(random.random())
+        if kind == "stretch" and not self.pix_stretch:
+            kind = "yawn"
+        if kind == "yawn" and not self.pix_yawn:
+            kind = "stretch"
+        if kind == "stretch":
+            self._start_stretch()
+        else:
+            self._start_yawn()
+
+    def _manual_stretch(self):
+        """右键菜单手动入口: 伸个懒腰。睡着时先叫醒, 走路时先停下。"""
+        self._touch()
+        if self.state == "walk":
+            self._stop_walk()
+        self._start_stretch()
+
+    def _manual_yawn(self):
+        """右键菜单手动入口: 打个哈欠。睡着时先叫醒, 走路时先停下。"""
+        self._touch()
+        if self.state == "walk":
+            self._stop_walk()
+        self._start_yawn()
 
     def _toggle_on_top(self, checked: bool):
         self.always_on_top = checked
@@ -1392,6 +1581,8 @@ class DesktopPet(FrameMixin, QWidget):
         self.zzz_phase = 0.0
         self._petting = False
         self._pet_timer.stop()
+        self._stop_action()
+        self._pending_sleep = False        # 睡前哈欠做到一半也被重置掉, 别 1.2 秒后突然睡着
         self._set_state("idle")
         self.opacity = 1.0
         self.store.set("opacity", 1.0)
@@ -1520,7 +1711,8 @@ class DesktopPet(FrameMixin, QWidget):
             pass
         for timer in (self._frame_timer, self._walk_timer, self._logic_timer,
                       self._idle_talk, self._next_walk, self._water_timer,
-                      self._pet_timer, self._eat_timer, self._weather_timer):
+                      self._pet_timer, self._eat_timer, self._action_timer,
+                      self._weather_timer):
             timer.stop()
         self._unregister_hotkeys()
         if getattr(self, "_shake_timer", None) is not None:   # 抖动是懒建的, 可能还没建
