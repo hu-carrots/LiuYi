@@ -1813,12 +1813,20 @@ class DesktopPet(FrameMixin, QWidget):
             return
         try:
             area = self._screen().availableGeometry()
-            restore_positions(
+            restored, failed = restore_positions(
                 self._icons, self._icon_backup,
                 (area.left(), area.top(), area.right(), area.bottom()))
-        finally:
-            self._icon_backup.clear()
-        self._say("好啦，图标都放回原位啦～", category="idle")
+        except Exception:
+            self._log_error("restore_icons")
+            self._say("图标恢复出错啦，原位置备份还在～", category="idle")
+            return
+        if not self._icon_backup.retain(failed):
+            self._say("图标恢复记录保存失败，原备份还在～", category="idle")
+        elif failed:
+            self._say(f"放回了 {restored} 个图标，还有 {len(failed)} 个没成功，备份已保留～",
+                      category="idle")
+        else:
+            self._say("好啦，图标都放回原位啦～", category="idle")
 
     def _on_action_tick(self):
         """新动作的帧推进, 仿照 _on_eat_tick: 播完回待机并重建 mask。"""
