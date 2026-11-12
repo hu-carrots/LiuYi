@@ -29,7 +29,8 @@ IMG_EAT = ["cat_eat.png", "cat_eat2.png"]   # 可选: 吃零食两帧(张嘴/闭
 EAT_MS = 180                     # 咀嚼每帧停留(毫秒)
 IMG_STRETCH = ["cat_stretch_1.png", "cat_stretch_2.png"]  # 可选: 伸懒腰两帧(蹲着准备/前爪前伸)
 IMG_YAWN = ["cat_yawn_1.png", "cat_yawn_2.png"]          # 可选: 打哈欠两帧(小口微张/大口捂嘴)
-ACTION_MS = 450                  # 伸懒腰/打哈欠每帧停留(毫秒), 两帧各播两轮约 1.8 秒
+IMG_PAW = ["cat_paw_1.png", "cat_paw_2.png", "cat_paw_3.png", "cat_paw_4.png"]  # 可选: 扒拉文件四帧(盯纸/拍纸/追纸/得意压纸)
+ACTION_MS = 450                  # 伸懒腰/打哈欠/扒拉文件每帧停留(毫秒), 两帧各播两轮约 1.8 秒, 扒拉四帧播一轮约 1.8 秒
 IMG_IDLE_BREATH = ["cat_idle_breath_1.png", "cat_idle_breath_2.png"]    # 可选: 待机呼吸两帧(吸气/呼气)
 IMG_SLEEP_BREATH = ["cat_sleep_breath_1.png", "cat_sleep_breath_2.png"]  # 可选: 睡觉呼吸两帧(吸气/呼气)
 BREATH_MS = 1200                 # 呼吸每帧停留(毫秒): 待机/睡觉各 3 帧一轮约 3.6 秒
@@ -192,6 +193,12 @@ LINES_YAWN = [
     "哈～欠，眼睛都睁不开了",
     "困困的…再眯一小会儿好不好嘛",
     "(张大嘴打哈欠)今天也辛苦啦",
+]
+LINES_PAW = [
+    "嘿！这张纸怎么自己跑出来啦，让我扒拉一下",
+    "啪！逮到你啦，休想从我爪子底下溜走",
+    "这张纸归我啦，上面写了什么好玩的？",
+    "嘿嘿，压住了，看你还往哪儿跑",
 ]
 # 抛掷落地台词(人设不变: 还是六一那只撒娇布偶猫, 别写成鲸鱼口吻)
 # _say 时复用 category="drag", 走现有语录频率/类别开关, 不新增 pet.json 键

@@ -75,7 +75,7 @@ def category_enabled(categories, category: str) -> bool:
 
 # ================================ 新动作: 伸懒腰 / 打哈欠 =================
 # 待机随机触发的节流: 上次动作后至少隔 5 分钟, 且本次待机超过 90 秒,
-# 每个 1 秒 tick 里只有小概率触发, 不会刚待机就连着伸懒腰打哈欠。
+# 每个 1 秒 tick 里只有小概率触发, 不会刚待机就连着伸懒腰打哈欠扒拉文件。
 # roll 由调用方传 random.random(), 这样逻辑可单元测试(不依赖随机种子)。
 IDLE_ACTION_MIN_GAP_SEC = 300    # 上次伸懒腰/打哈欠后至少隔这么久
 IDLE_ACTION_MIN_IDLE_SEC = 90    # 本次待机(无交互)超过这么久才考虑触发
@@ -99,11 +99,16 @@ def should_trigger_idle_action(idle_seconds, since_last_action_seconds, roll) ->
 
 
 def pick_idle_action(roll) -> str:
-    """待机随机动作二选一: roll < 0.5 伸懒腰, 否则打哈欠。"""
+    """待机随机动作三选一: roll < 1/3 伸懒腰, < 2/3 打哈欠, 否则扒拉文件。"""
     try:
-        return "stretch" if float(roll) < 0.5 else "yawn"
+        roll = float(roll)
     except (TypeError, ValueError):
         return "stretch"
+    if roll < 1 / 3:
+        return "stretch"
+    if roll < 2 / 3:
+        return "yawn"
+    return "paw"
 
 
 # ================================ 呼吸帧: 待机 / 睡觉 =================
