@@ -98,11 +98,14 @@ class IdleActionLogicTests(unittest.TestCase):
         self.assertEqual(IDLE_ACTION_MIN_GAP_SEC, 300)
         self.assertEqual(WAKE_STRETCH_CHANCE, 0.35)
 
-    def test_pick_idle_action_splits_evenly(self):
+    def test_pick_idle_action_splits_in_thirds(self):
         self.assertEqual(pick_idle_action(0.0), "stretch")
-        self.assertEqual(pick_idle_action(0.49), "stretch")
-        self.assertEqual(pick_idle_action(0.5), "yawn")
-        self.assertEqual(pick_idle_action(0.99), "yawn")
+        self.assertEqual(pick_idle_action(0.32), "stretch")
+        self.assertEqual(pick_idle_action(1 / 3), "yawn")
+        self.assertEqual(pick_idle_action(0.65), "yawn")
+        self.assertEqual(pick_idle_action(2 / 3), "paw")
+        self.assertEqual(pick_idle_action(0.99), "paw")
+        self.assertEqual(pick_idle_action("bad"), "stretch")
 
 
 class NewActionConfigTests(unittest.TestCase):
@@ -189,9 +192,10 @@ class NewActionCodeStructureTests(unittest.TestCase):
         self.assertIn("QTimer.singleShot(1200, self._finish_pending_sleep)", src)
         self.assertIn("self._action_timer", src)
         self.assertIn("WAKE_STRETCH_CHANCE", src)
-        # 右键菜单两个手动入口
+        # 右键菜单三个手动入口
         self.assertIn('"伸个懒腰"', src)
         self.assertIn('"打个哈欠"', src)
+        self.assertIn('"扒拉一下文件"', src)
 
     def test_new_images_exist_and_are_valid_frames(self):
         """4 张新图都在 image/ 里, 且是 600x600 透明 RGBA(用 Pillow 验, 不依赖 Qt)。"""

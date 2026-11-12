@@ -75,10 +75,11 @@ from .config import (
     IMG_BLINK, IMG_CLICK, IMG_DIZZY, IMG_IDLE, IMG_IDLE_BREATH, IMG_LAND,
     IMG_PET, IMG_SLEEP, IMG_SLEEP_BREATH, IMG_STRETCH, IMG_THROW,
     IMG_WALK_LEGACY, IMG_WALK_SEQ, IMG_YAWN, INSTANCE_TITLE,
-    BREATH_MS, DIZZY_MS, EAT_MS, IMG_EAT, IMG_HOLD, JUMP_HEIGHT,
+    BREATH_MS, DIZZY_MS, EAT_MS, IMG_EAT, IMG_HOLD, IMG_PAW, JUMP_HEIGHT,
     LAND_MS, LINES_ANGRY, LINES_BACK, LINES_CLICK, LINES_COMFORT,
     LINES_DIZZY, LINES_DRAG, LINES_FEED, LINES_IDLE, LINES_LAUNCH,
     LINES_PRAISE, LINES_SLEEP, LINES_STRETCH, LINES_TEASE, LINES_YAWN,
+    LINES_PAW,
     LOGIC_MS, MASK_INFLATE, PET_MS, PET_NAME, SCALE_MAX, SCALE_MIN,
     THROW_MS, TOP_MARGIN, Store, app_dir,
     get_global_idle_seconds,
@@ -298,7 +299,10 @@ class DesktopPet(FrameMixin, QWidget):
         self.pix_yawn = [pm for pm in (self._load_image(n) for n in IMG_YAWN)
                          if pm is not None and not pm.isNull()]
         self.pix_yawn_l = [p for p in (self._flipped(pm) for pm in self.pix_yawn) if p]
-        self._action_kind = None       # None / "stretch" / "yawn": 当前在做哪个新动作
+        self.pix_paw = [pm for pm in (self._load_image(n) for n in IMG_PAW)
+                        if pm is not None and not pm.isNull()]
+        self.pix_paw_l = [p for p in (self._flipped(pm) for pm in self.pix_paw) if p]
+        self._action_kind = None       # None / "stretch" / "yawn" / "paw": 当前在做哪个新动作
         self._action_index = 0
         self._action_left = 0
         self._last_action_at = time.monotonic()   # 上次新动作开始时间(待机随机触发的节流用)
@@ -1441,6 +1445,10 @@ class DesktopPet(FrameMixin, QWidget):
         self._act_yawn.triggered.connect(self._manual_yawn)
         menu.addAction(self._act_yawn)
 
+        self._act_paw = QAction("扒拉一下文件", menu)
+        self._act_paw.triggered.connect(self._manual_paw)
+        menu.addAction(self._act_paw)
+
         menu.addSeparator()
         act_quit = QAction("退出", menu)
         act_quit.triggered.connect(self.shutdown)
@@ -1468,6 +1476,7 @@ class DesktopPet(FrameMixin, QWidget):
         busy = self._eating or self._doing_action()
         self._act_stretch.setEnabled(bool(self.pix_stretch) and not busy)
         self._act_yawn.setEnabled(bool(self.pix_yawn) and not busy)
+        self._act_paw.setEnabled(bool(self.pix_paw) and not busy)
         self._menu.exec_(global_pos)
 
     # ---- 第一期: 菜单里的小开关 ----
@@ -1547,9 +1556,9 @@ class DesktopPet(FrameMixin, QWidget):
         except Exception:
             self._log_error("eat")
 
-    # ------------------------------------------------- 新动作: 伸懒腰 / 打哈欠
+    # ------------------------------------------------- 新动作: 伸懒腰 / 打哈欠 / 扒拉文件
     def _doing_action(self) -> bool:
-        """正在做伸懒腰或打哈欠(共用一个定时器, 同一时间只可能做一个)。"""
+        """正在做伸懒腰、打哈欠或扒拉文件(共用一个定时器, 同一时间只可能做一个)。"""
         return getattr(self, "_action_kind", None) is not None
 
     def _stop_action(self):
@@ -1562,13 +1571,14 @@ class DesktopPet(FrameMixin, QWidget):
         self._action_left = 0
 
     def _start_action(self, kind: str, lines, rounds: int = 2) -> bool:
-        """新动作的通用入口, 仿照 _start_eat: 两帧循环 rounds 轮后回待机。
+        """新动作的通用入口, 仿照 _start_eat: 帧循环 rounds 轮后回待机。
 
         返回 False 表示没做成(图缺失 / 正在吃东西或做别的动作 / 睡觉 /
         跳跃 / 被摸 / 被拎起 / 拖拽 / 动画关了 / 省电 / 不在待机状态),
         调用方据此决定要不要说兜底台词, 不要在图缺时崩。
         """
-        pool = self.pix_stretch if kind == "stretch" else self.pix_yawn
+        pool = {"stretch": self.pix_stretch, "yawn": self.pix_yawn,
+                "paw": self.pix_paw}.get(kind) or []
         if not pool:
             return False
         if (self._eating or self._doing_action() or self._sleeping()
@@ -1596,6 +1606,10 @@ class DesktopPet(FrameMixin, QWidget):
         """打哈欠: 小口微张 -> 大口捂嘴, 各播 rounds 轮。"""
         return self._start_action("yawn", LINES_YAWN, rounds)
 
+    def _start_paw(self, rounds: int = 1) -> bool:
+        """扒拉文件: 盯纸 -> 拍纸 -> 追纸 -> 得意压纸, 四帧播 rounds 轮(默认 1 轮约 1.8 秒)。"""
+        return self._start_action("paw", LINES_PAW, rounds)
+
     def _on_action_tick(self):
         """新动作的帧推进, 仿照 _on_eat_tick: 播完回待机并重建 mask。"""
         try:
@@ -1619,7 +1633,7 @@ class DesktopPet(FrameMixin, QWidget):
         """待机随机动作: 仅 state==idle 且什么都没在做时才考虑触发。
 
         节流与概率判断在 phase1.should_trigger_idle_action 里(纯函数,
-        可单元测试); 这里只做状态守卫和二选一, 选中的动作图缺了就换另一个。
+        可单元测试); 这里只做状态守卫和三选一, 选中的动作图缺了就换另一个。
         """
         if (self.state != "idle" or self._eating or self._doing_action()
                 or self._petting or self._holding or self._dragging
@@ -1627,21 +1641,19 @@ class DesktopPet(FrameMixin, QWidget):
             return
         if not self.anim_enabled or self.power_saver:
             return
-        if not self.pix_stretch and not self.pix_yawn:
+        if not self.pix_stretch and not self.pix_yawn and not self.pix_paw:
             return
         idle_for = time.monotonic() - self.last_interact
         since_action = time.monotonic() - self._last_action_at
         if not should_trigger_idle_action(idle_for, since_action, random.random()):
             return
         kind = pick_idle_action(random.random())
-        if kind == "stretch" and not self.pix_stretch:
-            kind = "yawn"
-        if kind == "yawn" and not self.pix_yawn:
-            kind = "stretch"
-        if kind == "stretch":
-            self._start_stretch()
-        else:
-            self._start_yawn()
+        starters = {"stretch": self._start_stretch,
+                    "yawn": self._start_yawn,
+                    "paw": self._start_paw}
+        for k in [kind] + [k for k in ("stretch", "yawn", "paw") if k != kind]:
+            if starters[k]():
+                break
 
     def _manual_stretch(self):
         """右键菜单手动入口: 伸个懒腰。睡着时先叫醒, 走路时先停下。"""
@@ -1656,6 +1668,13 @@ class DesktopPet(FrameMixin, QWidget):
         if self.state == "walk":
             self._stop_walk()
         self._start_yawn()
+
+    def _manual_paw(self):
+        """右键菜单手动入口: 扒拉一下文件。睡着时先叫醒, 走路时先停下。"""
+        self._touch()
+        if self.state == "walk":
+            self._stop_walk()
+        self._start_paw()
 
     # ------------------------------------------------------------- 抛掷: 抛物线
     def _try_throw(self) -> bool:
