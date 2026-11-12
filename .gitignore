@@ -21,6 +21,11 @@ build/
 pet.json
 pet.json.tmp
 
+# Icon layout backup (created at runtime by the push-icons feature,
+# only valid on this machine; never commit it)
+icon_layout_backup.json
+icon_layout_backup.json.tmp
+
 # Logs and OS files
 *.log
 .DS_Store

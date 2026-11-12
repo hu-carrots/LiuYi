@@ -85,7 +85,7 @@ class FrameMixin:
 
     def _frame(self):
         """当前应绘制的帧: (名字, QPixmap|None)。
-        优先级: 被拎起 > 抛掷(飞/落地/晕乎) > 跳跃/炸毛 > 吃东西 > 伸懒腰/打哈欠/扒拉文件 > 被摸 > 睡觉(含呼吸帧) > 走路 > 闭眼 > 待机(含呼吸帧)。
+        优先级: 被拎起 > 抛掷(飞/落地/晕乎) > 跳跃/炸毛 > 吃东西 > 伸懒腰/打哈欠/扒拉文件/推图标 > 被摸 > 睡觉(含呼吸帧) > 走路 > 闭眼 > 待机(含呼吸帧)。
         呼吸循环下标 0 是基础帧, 名字保持 "idle"/"sleep" 不变, 只有吸气/呼气才带 breath 后缀 ——
         这样图缺了、动画关了, 帧名和原来一模一样, 老测试和 mask 缓存都不受影响。"""
         # 拖动中: 整只猫被拎起来, 优先级最高
@@ -126,7 +126,7 @@ class FrameMixin:
             pool = self.pix_eat if self.facing >= 0 else (self.pix_eat_l or self.pix_eat)
             idx = self._eat_index % len(pool)
             return (f"eat{'_l' if self.facing < 0 else ''}_{idx}", pool[idx])
-        # 新动作: 伸懒腰 / 打哈欠 / 扒拉文件, 循环播放; 名字带动作名+序号+朝向,
+        # 新动作: 伸懒腰 / 打哈欠 / 扒拉文件 / 推图标, 循环播放; 名字带动作名+序号+朝向,
         # mask 缓存按名字索引, 翻转后要拿到翻转过的遮罩。
         # 注意放被摸之前、睡觉之前: 睡前打哈欠时状态还是 idle, 靠这里盖住待机帧;
         # 而真正睡着后 _set_state 会停掉动作, 睡觉帧才接管。
@@ -142,6 +142,10 @@ class FrameMixin:
             pool = self.pix_paw if self.facing >= 0 else (self.pix_paw_l or self.pix_paw)
             idx = self._action_index % len(pool)
             return (f"paw{'_l' if self.facing < 0 else ''}_{idx}", pool[idx])
+        if self._action_kind == "push" and self.pix_push:
+            pool = self.pix_push if self.facing >= 0 else (self.pix_push_l or self.pix_push)
+            idx = self._action_index % len(pool)
+            return (f"push{'_l' if self.facing < 0 else ''}_{idx}", pool[idx])
         if self._petting and self.pix_pet is not None:
             if self.facing < 0 and self.pix_pet_l is not None:
                 return "pet_l", self.pix_pet_l

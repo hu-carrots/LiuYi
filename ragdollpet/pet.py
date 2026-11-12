@@ -75,14 +75,18 @@ from .config import (
     IMG_BLINK, IMG_CLICK, IMG_DIZZY, IMG_IDLE, IMG_IDLE_BREATH, IMG_LAND,
     IMG_PET, IMG_SLEEP, IMG_SLEEP_BREATH, IMG_STRETCH, IMG_THROW,
     IMG_WALK_LEGACY, IMG_WALK_SEQ, IMG_YAWN, INSTANCE_TITLE,
-    BREATH_MS, DIZZY_MS, EAT_MS, IMG_EAT, IMG_HOLD, IMG_PAW, JUMP_HEIGHT,
+    BREATH_MS, DIZZY_MS, EAT_MS, IMG_EAT, IMG_HOLD, IMG_PAW, IMG_PUSH, JUMP_HEIGHT,
     LAND_MS, LINES_ANGRY, LINES_BACK, LINES_CLICK, LINES_COMFORT,
     LINES_DIZZY, LINES_DRAG, LINES_FEED, LINES_IDLE, LINES_LAUNCH,
     LINES_PRAISE, LINES_SLEEP, LINES_STRETCH, LINES_TEASE, LINES_YAWN,
-    LINES_PAW,
+    LINES_PAW, LINES_PUSH,
     LOGIC_MS, MASK_INFLATE, PET_MS, PET_NAME, SCALE_MAX, SCALE_MIN,
-    THROW_MS, TOP_MARGIN, Store, app_dir,
+    THROW_MS, TOP_MARGIN, Store, app_dir, data_dir,
     get_global_idle_seconds,
+)
+from .desktop_icons import (
+    ICON_BACKUP_FILENAME, DesktopIconBackend, IconLayoutBackup,
+    clamp_icon_pos, push_step, restore_positions, target_pet_x, walk_step_toward,
 )
 from .frames import FrameMixin
 from .phase1 import (
@@ -302,10 +306,22 @@ class DesktopPet(FrameMixin, QWidget):
         self.pix_paw = [pm for pm in (self._load_image(n) for n in IMG_PAW)
                         if pm is not None and not pm.isNull()]
         self.pix_paw_l = [p for p in (self._flipped(pm) for pm in self.pix_paw) if p]
-        self._action_kind = None       # None / "stretch" / "yawn" / "paw": 当前在做哪个新动作
+        self.pix_push = [pm for pm in (self._load_image(n) for n in IMG_PUSH)
+                         if pm is not None and not pm.isNull()]
+        self.pix_push_l = [p for p in (self._flipped(pm) for pm in self.pix_push) if p]
+        self._action_kind = None       # None / "stretch" / "yawn" / "paw" / "push": 当前在做哪个新动作
         self._action_index = 0
         self._action_left = 0
         self._last_action_at = time.monotonic()   # 上次新动作开始时间(待机随机触发的节流用)
+        self._action_on_done = None    # 新动作播完后的回调(推图标用), _stop_action 会清掉
+        # 桌面真实图标(冒险版, 仅 Windows): 走过去推真的图标; 非 Windows 静默关闭
+        self._icons = DesktopIconBackend()
+        self._icon_backup = IconLayoutBackup(
+            os.path.join(data_dir(), ICON_BACKUP_FILENAME))
+        self._walk_target_x = None     # 走向目标点时的目标猫 x(左上角), None = 随机散步
+        self._walk_target_icon = None  # 本次要推的图标 {"name","x","y","index"}
+        self._walk_arrived = None      # 走到目标后执行的回调(入参是图标 dict)
+        self._push_target = None       # 正在扒拉的真实图标 {"name","x","y","index"}
         # 呼吸帧(可选): 待机/睡觉各两帧(吸气/呼气); 图缺了池子里只剩基础帧, 不循环也不崩
         self.pix_idle_breath = [pm for pm in (self._load_image(n) for n in IMG_IDLE_BREATH)
                                 if pm is not None and not pm.isNull()]
@@ -742,6 +758,9 @@ class DesktopPet(FrameMixin, QWidget):
         self._next_walk.stop()          # 睡觉/关动画期间别再空转地排散步
         self._walk_left = 0
         self._walk_bob = 0
+        self._walk_target_x = None      # 走向目标点也被停掉(关动画/省电/睡觉/手动动作)
+        self._walk_target_icon = None
+        self._walk_arrived = None
         if self.state == "walk":
             self.state = "idle"
 
@@ -761,7 +780,13 @@ class DesktopPet(FrameMixin, QWidget):
         try:
             if (self.state != "walk" or self._sleeping()
                     or not (self.anim_enabled and not self.power_saver)):
-                self._end_walk()
+                if self._walk_target_x is not None:
+                    self._cancel_icon_walk()
+                else:
+                    self._end_walk()
+                return
+            if self._walk_target_x is not None:
+                self._on_target_walk_tick()
                 return
             self._walk_left -= 1
             # 每 _walk_step_ticks 帧切一次步态; 帧数越多间隔越短(总周期约 1 秒)
@@ -797,6 +822,83 @@ class DesktopPet(FrameMixin, QWidget):
                 self._end_walk()
         except Exception:
             self._log_error("walk")
+
+    # ---------------------------------------------- 走向目标点(推真实图标)
+    def _start_walk_to_icon(self, icon, on_arrived) -> bool:
+        """走向真实图标: 只在 free 模式、动画开着、什么都没做时用。
+
+        到达后调 on_arrived(icon); 半路被打断就取消, 不回调。
+        猫只横向走, 目标是图标正下方的 x(图标可能在屏幕上半部, 猫飞不上去)。
+        """
+        if (self.mode != "free" or self._sleeping() or self._jumping or self._petting
+                or self._doing_action() or self._throwing or self._holding or self._dragging
+                or self._pending_sleep
+                or self.power_saver or not self.anim_enabled or self.state != "idle"):
+            return False
+        try:
+            area = self._screen().availableGeometry()
+            target_x = target_pet_x(icon["x"], self.width(),
+                                    area.left(), area.right())
+        except Exception:
+            return False
+        self._walk_target_x = target_x
+        self._walk_target_icon = dict(icon)
+        self._walk_arrived = on_arrived
+        self.state = "walk"
+        self._bump_stat("walks")
+        self._walk_left = 10 ** 6           # 目标走路按到达判定, 步数给个大数防缓动算错
+        self._walk_total = self._walk_left
+        self._walk_toggle = 0
+        self._walk_screen = self._screen()
+        self._walk_timer.start(FRAME_MS)
+        self._relayout()
+        self._rebuild_mask()
+        self.update()
+        return True
+
+    def _cancel_icon_walk(self):
+        """取消走向目标点(被抓住/点一下/睡觉/关动画/重置时):
+        清目标字段, 其余走正常结束走路的流程(保存位置、再排散步)。"""
+        self._walk_target_x = None
+        self._walk_target_icon = None
+        self._walk_arrived = None
+        self._end_walk()
+
+    def _on_target_walk_tick(self):
+        """走向目标点的一帧: 朝目标 x 走, 到 40px 内停下, 然后开始扒拉图标。
+
+        步态/起伏复用散步那套; 中途被抓住/睡觉/关动画时由 _on_walk_tick
+        的守卫取消, 不会走到天荒地老。
+        """
+        try:
+            new_x, arrived = walk_step_toward(self.x(), self._walk_target_x, 2)
+            if new_x > self.x():
+                self.facing = 1
+            elif new_x < self.x():
+                self.facing = -1
+            # 到了那一 tick 没动: 朝向保持走过来的方向, 别翻成右(推的方向跟着朝向走)
+            if new_x != self.x():
+                self._walk_toggle += 1
+                if self._walk_toggle % self._walk_step_ticks == 0:
+                    self._relayout()
+                    self._rebuild_mask()
+                    self.update()
+            stride = max(1, self._walk_step_ticks)
+            phase = (self._walk_toggle % stride) / stride
+            bob = -int(round(2.0 * abs(math.sin(math.pi * phase))))
+            if bob != self._walk_bob:
+                self._walk_bob = bob
+                self.update()
+            self.move(new_x, self.y())
+            self.bubble.follow(self.pos(), self.size(), self._content_top())
+            if arrived:
+                target = self._walk_target_icon
+                cb = self._walk_arrived
+                self._cancel_icon_walk()
+                if cb is not None:
+                    cb(target)
+        except Exception:
+            self._log_error("target_walk")
 
     # ------------------------------------------------------------- 提醒
     def _on_idle_talk(self):
@@ -1155,6 +1257,8 @@ class DesktopPet(FrameMixin, QWidget):
     def mousePressEvent(self, event):
         self._touch()
         if event.button() == Qt.LeftButton:
+            if self._walk_target_x is not None:
+                self._cancel_icon_walk()      # 走向图标半路被抓住: 取消, 不推了
             if self._throwing:
                 self._cancel_throw()      # 飞行中抓住: 取消抛掷, 回到拖拽
             self._drag_off = event.globalPos() - self.frameGeometry().topLeft()
@@ -1449,14 +1553,24 @@ class DesktopPet(FrameMixin, QWidget):
         self._act_paw.triggered.connect(self._manual_paw)
         menu.addAction(self._act_paw)
 
+        # ---- 推真实图标(冒险版, 仅 Windows): 走过去推真的桌面图标 ----
+        self._act_push_icon = QAction("推一下桌面图标", menu)
+        self._act_push_icon.triggered.connect(self._manual_push_icon)
+        menu.addAction(self._act_push_icon)
+
+        self._act_restore_icons = QAction("把图标放回去", menu)
+        self._act_restore_icons.triggered.connect(self._restore_icons)
+        menu.addAction(self._act_restore_icons)
+
         menu.addSeparator()
         act_quit = QAction("退出", menu)
         act_quit.triggered.connect(self.shutdown)
         menu.addAction(act_quit)
         return menu
 
-    def _show_menu(self, global_pos: QPoint):
-        if self._menu is None:                # 只建一次, 不再每次右键泄漏
+    def _update_menu_state(self):
+        """右键菜单打开前刷新勾选/禁用状态(不含 exec_, 方便测试直接调)。"""
+        if self._menu is None:                # 没建过就先建, 否则下面没动作可改
             self._menu = self._build_menu()
         self._act_top.setChecked(self.always_on_top)
         self._act_anim.setChecked(self.anim_enabled)
@@ -1477,6 +1591,15 @@ class DesktopPet(FrameMixin, QWidget):
         self._act_stretch.setEnabled(bool(self.pix_stretch) and not busy)
         self._act_yawn.setEnabled(bool(self.pix_yawn) and not busy)
         self._act_paw.setEnabled(bool(self.pix_paw) and not busy)
+        # 推图标: 仅 Windows + 有扒拉帧 + 不忙; 恢复: 有备份记录时才能点
+        self._act_push_icon.setEnabled(
+            bool(self._icons.enabled) and bool(self.pix_paw) and not busy)
+        self._act_restore_icons.setEnabled(bool(self._icon_backup) and not busy)
+
+    def _show_menu(self, global_pos: QPoint):
+        if self._menu is None:                # 只建一次, 不再每次右键泄漏
+            self._menu = self._build_menu()
+        self._update_menu_state()
         self._menu.exec_(global_pos)
 
     # ---- 第一期: 菜单里的小开关 ----
@@ -1569,16 +1692,18 @@ class DesktopPet(FrameMixin, QWidget):
         self._action_kind = None
         self._action_index = 0
         self._action_left = 0
+        self._action_on_done = None      # 取消动作时不推图标, 回调一起清掉
 
-    def _start_action(self, kind: str, lines, rounds: int = 2) -> bool:
+    def _start_action(self, kind: str, lines, rounds: int = 2, on_done=None) -> bool:
         """新动作的通用入口, 仿照 _start_eat: 帧循环 rounds 轮后回待机。
 
         返回 False 表示没做成(图缺失 / 正在吃东西或做别的动作 / 睡觉 /
         跳跃 / 被摸 / 被拎起 / 拖拽 / 动画关了 / 省电 / 不在待机状态),
         调用方据此决定要不要说兜底台词, 不要在图缺时崩。
+        on_done 是播完后的回调(推图标用); 动作中途被停掉时不调。
         """
         pool = {"stretch": self.pix_stretch, "yawn": self.pix_yawn,
-                "paw": self.pix_paw}.get(kind) or []
+                "paw": self.pix_paw, "push": self.pix_push}.get(kind) or []
         if not pool:
             return False
         if (self._eating or self._doing_action() or self._sleeping()
@@ -1589,6 +1714,7 @@ class DesktopPet(FrameMixin, QWidget):
         self._action_kind = kind
         self._action_index = 0
         self._action_left = max(2, rounds * len(pool))
+        self._action_on_done = on_done
         self._last_action_at = time.monotonic()
         self._relayout()
         self._rebuild_mask()
@@ -1607,8 +1733,92 @@ class DesktopPet(FrameMixin, QWidget):
         return self._start_action("yawn", LINES_YAWN, rounds)
 
     def _start_paw(self, rounds: int = 1) -> bool:
-        """扒拉文件: 盯纸 -> 拍纸 -> 追纸 -> 得意压纸, 四帧播 rounds 轮(默认 1 轮约 1.8 秒)。"""
+        """扒拉文件: 先试真实模式(走过去推真图标), 不行回落到原地扒拉道具纸。
+
+        四帧播 rounds 轮(默认 1 轮约 1.8 秒)。
+        """
+        if self._try_start_real_paw():
+            return True
         return self._start_action("paw", LINES_PAW, rounds)
+
+    def _try_start_real_paw(self) -> bool:
+        """真实模式: 随机挑一个真实桌面图标, 走过去, 到了再扒拉、推一把。
+
+        任何一步不行返回 False, 调用方回落到道具纸, 行为和原来一模一样。
+        """
+        if (self.mode != "free" or not self.anim_enabled or self.power_saver
+                or self.state != "idle" or self._eating or self._doing_action()
+                or self._petting or self._holding or self._dragging or self._throwing
+                or self._sleeping() or self._pending_sleep):
+            return False
+        if not self.pix_paw:
+            return False
+        try:
+            icons = self._icons.real_file_icons()
+        except Exception:
+            return False
+        if not icons:
+            return False
+        icon = random.choice(icons)
+        return self._start_walk_to_icon(icon, self._on_icon_arrived)
+
+    def _on_icon_arrived(self, icon):
+        """走到图标旁: 开始推图标, 播完推一把。
+
+        推帧缺了就回落到扒拉帧播一次再推图标(on_done 照常推);
+        扒拉帧也没了, _start_action 回 False, _push_target 清掉, 不崩。
+        """
+        self._push_target = dict(icon)
+        lines = [template.format(name=icon["name"]) for template in LINES_PUSH]
+        kind = "push" if self.pix_push else "paw"
+        if not self._start_action(kind, lines, rounds=1,
+                                  on_done=self._push_icon_after_paw):
+            self._push_target = None
+
+    def _push_icon_after_paw(self):
+        """扒拉播完: 把图标往爪子方向推一小段, 推完读回来核对。
+
+        推之前先记下原始位置(每个图标只记第一次, 持久化到备份文件);
+        推不动(比如开了自动排列)就当这次失败, 不报错、不重试。
+        """
+        target = getattr(self, "_push_target", None)
+        self._push_target = None
+        if not target:
+            return
+        try:
+            pos = self._icons.get_position(target["name"])
+            if pos is None:
+                return
+            base_angle = 0.0 if self.facing >= 0 else 180.0
+            new_x, new_y = push_step(pos[0], pos[1], base_angle, rng=random)
+            area = self._screen().availableGeometry()
+            new_x, new_y = clamp_icon_pos(
+                new_x, new_y,
+                (area.left(), area.top(), area.right(), area.bottom()))
+            self._icon_backup.record(target["name"], pos)
+            if not self._icons.set_position(target["name"], new_x, new_y):
+                return
+            back = self._icons.get_position(target["name"])
+            if back is None or abs(back[0] - new_x) > 2 or abs(back[1] - new_y) > 2:
+                return
+        except Exception:
+            self._log_error("push_icon")
+
+    def _restore_icons(self):
+        """把图标放回去: 备份里所有图标恢复到原始位置, 恢复完清空备份。
+
+        单个图标恢复失败就跳过, 不影响其他的。
+        """
+        if not self._icon_backup:
+            return
+        try:
+            area = self._screen().availableGeometry()
+            restore_positions(
+                self._icons, self._icon_backup,
+                (area.left(), area.top(), area.right(), area.bottom()))
+        finally:
+            self._icon_backup.clear()
+        self._say("好啦，图标都放回原位啦～", category="idle")
 
     def _on_action_tick(self):
         """新动作的帧推进, 仿照 _on_eat_tick: 播完回待机并重建 mask。"""
@@ -1618,9 +1828,16 @@ class DesktopPet(FrameMixin, QWidget):
                 self._action_timer.stop()
                 self._action_kind = None
                 self._action_index = 0
+                on_done = getattr(self, "_action_on_done", None)
+                self._action_on_done = None
                 self._relayout()
                 self._rebuild_mask()
                 self.update()
+                if on_done is not None:
+                    try:
+                        on_done()
+                    except Exception:
+                        self._log_error("action_done")
                 return
             self._action_index += 1
             self._relayout()
@@ -1671,6 +1888,14 @@ class DesktopPet(FrameMixin, QWidget):
 
     def _manual_paw(self):
         """右键菜单手动入口: 扒拉一下文件。睡着时先叫醒, 走路时先停下。"""
+        self._touch()
+        if self.state == "walk":
+            self._stop_walk()
+        self._start_paw()
+
+    def _manual_push_icon(self):
+        """右键菜单手动入口: 推一下桌面图标。挑个真图标走过去推一次;
+        不行(没图标/不是 free 模式/读不到位置)就原地扒拉一次。"""
         self._touch()
         if self.state == "walk":
             self._stop_walk()
@@ -1814,6 +2039,8 @@ class DesktopPet(FrameMixin, QWidget):
         self._petting = False
         self._pet_timer.stop()
         self._stop_action()
+        if self._walk_target_x is not None:
+            self._cancel_icon_walk()       # 走向图标做到一半也被重置掉
         self._end_throw()              # 飞到一半也被重置掉, 别落到奇怪的位置
         self._pending_sleep = False        # 睡前哈欠做到一半也被重置掉, 别 1.2 秒后突然睡着
         self._set_state("idle")
