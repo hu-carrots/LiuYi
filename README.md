@@ -25,7 +25,7 @@ AI 聊天 / 长期记忆 / 自由时间逛 B 站是第二、三期，本期没�
 
 pet.json 新增字段（旧文件没有时自动补默认值）：`speech_tier`、`speech_categories`、`mode`、`window_layer`、`opacity`、`locked`、`click_through`、`autostart`、`size_preset`、`reminders`、`dnd_default_min`、`weather_on`、`weather_city`、`app_watch`、`app_launch_on`、`hotkeys`、`stats_date`、`stat_clicks`、`stat_walks`、`stat_reminders`、`stat_feeds`、`stat_wakes`。
 
-测试：`python -m unittest discover -s tests -v`（186 项：6 项补帧导入 + 28 项第一期纯逻辑 + 10 项离屏 GUI 集成 + 21 项新动作 + 20 项呼吸帧 + 28 项抛掷 + 15 项扒拉 + 50 项推图标 + 8 项推帧）。Linux 下跑的是逻辑测试和离屏测试，Windows 专属功能只做了守卫降级验证。本机没装 PyQt5 时离屏 GUI 测试自动跳过（61 项跳过），不要读作通过；装了 PyQt5 5.15.11 的环境里 186 项应全部通过。
+测试：`python -m unittest discover -s tests -v`。测试数量随功能增加而变化，以实际运行结果为准。未安装 PyQt5 时 GUI 测试会跳过，跳过不等于通过；Windows Explorer 图标操作仍需 Windows 真机验证。
 
 ### Windows 真机验证清单（本期在 Linux VM 里无法跑真机，需在 Windows 上再验）
 
@@ -43,6 +43,15 @@ pet.json 新增字段（旧文件没有时自动补默认值）：`speech_tier`�
 - [ ] 睡醒伸懒腰：深睡后动一下键鼠醒来，约三分之一概率先伸个懒腰再说别的（另外三分之一说“你回来啦”，其余不说话）
 - [ ] 睡前打哈欠：待机满 5 分钟要睡时，先打一个哈欠、约 1.2 秒后再趴下睡；哈欠期间点它一下就不睡了，留在待机
 - [ ] 抛掷：拖着猫快速一甩再松手，猫沿抛物线飞出去、落回起抛点同一高度，全程不出屏幕；落地先低身下蹲约 0.25 秒，再晕乎约 1.2 秒说一句晕乎台词后回待机；慢慢松手不抛；飞行中抓住就取消，回到拖拽
+
+## 维护与验证（当前代码）
+
+- **启动程序**：`python -m pip install -r requirements.txt`，然后运行 `python desktop_pet_v2.1.py`；保留历史启动器名称以兼容旧快捷方式。
+- **补帧工具**：`python -m pip install -r requirements-import.txt`，运行 `python import_frames.py --out walk_test --fit per-frame`。Pillow 只用于离线图片导入，不是桌宠运行时依赖。
+- **回归测试**：`python -m unittest discover -s tests -v`；CI 在 Linux 离屏模式下运行，Windows Explorer 图标交互、托盘、热键及打包需要单独真机检查。
+- **桌面图标备份**：`icon_layout_backup.json` 属于本机数据，禁止提交。恢复失败的记录应保留；请勿在未确认全部恢复前手动删除。
+- **目录约定**：`ragdollpet/` 为应用源码，`tests/` 为测试，`image/` 为运行素材，`source/` 为原图。避免为了美观移动这些路径，以免破坏用户素材或旧配置。
+- **分支约定**：从 `main` 创建工作分支、通过 PR 合并；已合并的远程分支可在确认不再使用后删除。
 
 ## 使用说明
 
@@ -108,7 +117,7 @@ python desktop_pet_v2.1.py        # 启动器（历史文件名，见“目录�
 | 打个哈欠 | 手动打哈欠（同上） |
 | 扒拉一下文件 | 手动扒拉文件（同上；先试真实模式：走过去推一个真的桌面图标，不行才原地扒拉道具纸） |
 | 推一下桌面图标 | 手动推一个真实的桌面图标（仅 Windows；走过去扒拉它，图标挪约 32px、说出文件名；不是 free 模式或没图标时原地扒拉一次） |
-| 把图标放回去 | 把推过的图标全部恢复到原始位置（没推过时变灰；恢复完备份清空） |
+| 把图标放回去 | 恢复推过的图标；成功恢复的记录会清除，失败图标的原始位置备份会保留，以便再次尝试 |
 | 退出 | 保存位置后退出 |
 
 ### 设置项
@@ -355,7 +364,7 @@ pyinstaller --noconfirm --clean --onefile --noconsole --name LiuYi ^
 python -m unittest discover -s tests -v
 ```
 
-（44 项：6 项补帧导入 + 28 项第一期纯逻辑 + 10 项离屏 GUI 集成。Linux 下 10 项离屏 GUI 测试会因缺 PyQt5 被跳过，如实报告即可。）
+（测试数量以当前运行结果为准。缺少 PyQt5 时 GUI 测试可能跳过；请同时检查失败和跳过数量。）
 
 历史开发记录里的专项脚本（`petcheck_v21.py`、`regress_v21.py`、`walkcheck_v21.py`、`bench_v21.py`、`soak_v21.py`、`selftest_v21.py`、`realscreen_v21.py`、`realwalk_v21.py`）未随当前仓库提供，本次整理已移除对它们的引用；如需恢复，请从 git 历史里找。
 
