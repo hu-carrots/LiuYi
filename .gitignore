@@ -30,3 +30,10 @@ icon_layout_backup.json.tmp
 *.log
 .DS_Store
 Thumbs.db
+
+# Generated frame-import previews and local test output
+walk_test/
+walk_preview.png
+.pytest_cache/
+.coverage
+htmlcov/
