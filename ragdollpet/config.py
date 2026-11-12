@@ -33,6 +33,12 @@ ACTION_MS = 450                  # 伸懒腰/打哈欠每帧停留(毫秒), 两�
 IMG_IDLE_BREATH = ["cat_idle_breath_1.png", "cat_idle_breath_2.png"]    # 可选: 待机呼吸两帧(吸气/呼气)
 IMG_SLEEP_BREATH = ["cat_sleep_breath_1.png", "cat_sleep_breath_2.png"]  # 可选: 睡觉呼吸两帧(吸气/呼气)
 BREATH_MS = 1200                 # 呼吸每帧停留(毫秒): 待机/睡觉各 3 帧一轮约 3.6 秒
+IMG_THROW = ["cat_throw_1.png", "cat_throw_2.png"]  # 可选: 抛掷两帧(甩出/翻滚)
+IMG_LAND = "cat_land_1.png"      # 可选: 落地一瞬间(低身下蹲)
+IMG_DIZZY = "cat_dizzy_1.png"    # 可选: 落地后晕乎乎(蚊香眼+星星)
+THROW_MS = 120                   # 飞行中每帧停留(毫秒), 两帧交替翻滚
+LAND_MS = 250                    # 落地帧停留(毫秒)
+DIZZY_MS = 1200                  # 晕乎帧停留(毫秒), 然后回待机
 
 BASE_H = 220            # 1.0x 时猫的显示高度(逻辑像素)
 TOP_MARGIN = 64         # 窗口顶部留白, 必须 > JUMP_HEIGHT
@@ -186,6 +192,13 @@ LINES_YAWN = [
     "哈～欠，眼睛都睁不开了",
     "困困的…再眯一小会儿好不好嘛",
     "(张大嘴打哈欠)今天也辛苦啦",
+]
+# 抛掷落地台词(人设不变: 还是六一那只撒娇布偶猫, 别写成鲸鱼口吻)
+# _say 时复用 category="drag", 走现有语录频率/类别开关, 不新增 pet.json 键
+LINES_DIZZY = [
+    "呜…头好晕，星星在转圈圈",
+    "哎呀飞得太快啦，晕乎乎的…",
+    "转晕啦，让我坐一会儿缓缓",
 ]
 # 应用启动台词用 {app} 占位, 运行时替换成应用名
 LINES_LAUNCH = [

@@ -72,22 +72,24 @@ from .assets import resource_path
 from .bubble import SpeechBubble
 from .config import (
     ACTION_MS, BASE_H, BLINK_RATIO, BUBBLE_GAP, DOUBLE_CLICK_SEC, FRAME_MS,
-    IMG_BLINK, IMG_CLICK, IMG_IDLE, IMG_IDLE_BREATH, IMG_PET, IMG_SLEEP,
-    IMG_SLEEP_BREATH, IMG_STRETCH, IMG_WALK_LEGACY,
-    IMG_WALK_SEQ, IMG_YAWN, INSTANCE_TITLE,
-    BREATH_MS, EAT_MS, IMG_EAT, IMG_HOLD, JUMP_HEIGHT, LINES_ANGRY, LINES_BACK, LINES_CLICK,
-    LINES_COMFORT, LINES_DRAG, LINES_FEED, LINES_IDLE, LINES_LAUNCH, LINES_PRAISE,
-    LINES_SLEEP, LINES_STRETCH, LINES_TEASE, LINES_YAWN, LOGIC_MS, MASK_INFLATE,
-    PET_MS, PET_NAME, SCALE_MAX, SCALE_MIN, TOP_MARGIN, Store, app_dir,
+    IMG_BLINK, IMG_CLICK, IMG_DIZZY, IMG_IDLE, IMG_IDLE_BREATH, IMG_LAND,
+    IMG_PET, IMG_SLEEP, IMG_SLEEP_BREATH, IMG_STRETCH, IMG_THROW,
+    IMG_WALK_LEGACY, IMG_WALK_SEQ, IMG_YAWN, INSTANCE_TITLE,
+    BREATH_MS, DIZZY_MS, EAT_MS, IMG_EAT, IMG_HOLD, JUMP_HEIGHT,
+    LAND_MS, LINES_ANGRY, LINES_BACK, LINES_CLICK, LINES_COMFORT,
+    LINES_DIZZY, LINES_DRAG, LINES_FEED, LINES_IDLE, LINES_LAUNCH,
+    LINES_PRAISE, LINES_SLEEP, LINES_STRETCH, LINES_TEASE, LINES_YAWN,
+    LOGIC_MS, MASK_INFLATE, PET_MS, PET_NAME, SCALE_MAX, SCALE_MIN,
+    THROW_MS, TOP_MARGIN, Store, app_dir,
     get_global_idle_seconds,
 )
 from .frames import FrameMixin
 from .phase1 import (
     LAYERS, MODES, SIZE_PRESETS, WAKE_STRETCH_CHANCE, AppUsageTracker, DailyStats,
-    DndQueue, category_enabled, clamp_opacity, default_reminders, due_reminders,
-    format_weather_line, next_breath_index, next_idle_interval, parse_reminder,
-    pick_idle_action, should_advance_breath, should_trigger_idle_action,
-    snap_position,
+    DndQueue, category_enabled, clamp_opacity, default_reminders, drag_velocity,
+    due_reminders, format_weather_line, next_breath_index, next_idle_interval,
+    parse_reminder, pick_idle_action, plan_throw, should_advance_breath,
+    should_trigger_idle_action, snap_position, throw_pos,
 )
 from . import platform_win
 from .weather import WeatherError, fetch_weather
@@ -256,6 +258,9 @@ class DesktopPet(FrameMixin, QWidget):
         # ---------- 呼吸帧动画(待机/睡觉, 基础帧 + 吸气 + 呼气, 每帧约 1.2 秒) ----------
         self._breath_timer = QTimer(self, timeout=self._on_breath_tick)
 
+        # ---------- 抛掷动画(飞行/落地/晕乎, 按 FRAME_MS 推进抛物线) ----------
+        self._throw_timer = QTimer(self, timeout=self._on_throw_tick)
+
         # ---------- 资源 ----------
         self.pix_idle = self._load_image(IMG_IDLE)
         self.pix_sleep = self._load_image(IMG_SLEEP)
@@ -304,6 +309,20 @@ class DesktopPet(FrameMixin, QWidget):
         self.pix_sleep_breath = [pm for pm in (self._load_image(n) for n in IMG_SLEEP_BREATH)
                                  if pm is not None and not pm.isNull()]
         self._breath_index = 0        # 呼吸循环下标: 0 基础帧, 1 吸气, 2 呼气
+        # 抛掷(可选): 飞行两帧交替、落地一帧、晕乎一帧; 图缺了降级, 不崩
+        self.pix_throw = [pm for pm in (self._load_image(n) for n in IMG_THROW)
+                          if pm is not None and not pm.isNull()]
+        self.pix_throw_l = [p for p in (self._flipped(pm) for pm in self.pix_throw) if p]
+        self.pix_land = self._load_image(IMG_LAND)
+        self.pix_land_l = self._flipped(self.pix_land)
+        self.pix_dizzy = self._load_image(IMG_DIZZY)
+        self.pix_dizzy_l = self._flipped(self.pix_dizzy)
+        self._throwing = False         # 抛掷进行中(飞行/落地/晕乎任一阶段)
+        self._throw_phase = None       # None / "fly" / "land" / "dizzy"
+        self._throw_plan = None        # plan_throw() 的 dict: vx/vy/duration/x0/y0/x_land
+        self._throw_t = 0.0            # 当前阶段已过秒数
+        self._throw_index = 0          # 飞行帧下标(约每 THROW_MS 换一帧)
+        self._throw_samples = []       # 拖动时的指针记录 [(单调秒, x, y)], 只留最近约 120ms
         self._pending_sleep = False    # 睡前打哈欠进行中: 哈欠完再真正进 sleep
         self._petting = False
         self._last_click_at = 0.0
@@ -542,12 +561,12 @@ class DesktopPet(FrameMixin, QWidget):
                     self._enter_deep_sleep()
                 elif self.state == "deep_sleep" and idle < 1.0:
                     self._wake_up(by_input=True)
-            if not self._sleeping() and not self._jumping:
+            if not self._sleeping() and not self._jumping and not self._throwing:
                 # 用单调时钟算间隔: 系统时间被 NTP 校准/手动改时不会误判
                 if time.monotonic() - self.last_interact >= self.sleep_minutes * 60:
                     self._enter_sleep()
             # 待机久了随机伸懒腰/打哈欠(节流 + 互斥都在 _maybe_idle_action 里)
-            if not self._sleeping() and not self._jumping:
+            if not self._sleeping() and not self._jumping and not self._throwing:
                 self._maybe_idle_action()
             # 分辨率变化 / 拔掉副屏 / 任务栏挪位后, 别把猫留在屏幕外
             if not self._visible_somewhere(self.pos()):
@@ -610,6 +629,7 @@ class DesktopPet(FrameMixin, QWidget):
             self.tail_dx = 0
             self._stop_walk()
             self._stop_action()            # 关动画/省电: 伸懒腰/打哈欠做到一半也要停, 别卡住
+            self._end_throw()              # 关动画/省电: 飞到一半也要落下来, 别冻在半空
         self.breath_group.stop()
         self._dy = 0
         self._relayout()
@@ -655,7 +675,8 @@ class DesktopPet(FrameMixin, QWidget):
             if not should_advance_breath(self.state, self.anim_enabled,
                                            self.power_saver, self._eating,
                                            self._doing_action(), self._petting,
-                                           self._holding, self._jumping):
+                                           self._holding, self._jumping,
+                                           self._throwing):
                 return
             new_index = next_breath_index(self._breath_index, len(self._breath_pool()))
             if new_index != self._breath_index:
@@ -670,7 +691,8 @@ class DesktopPet(FrameMixin, QWidget):
         try:
             self.breath_group.stop()
             self._dy = 0
-            if not (self.anim_enabled and not self.power_saver) or self._jumping:
+            if not (self.anim_enabled and not self.power_saver) or self._jumping \
+                    or self._throwing:
                 self.update()
                 return
             # 有真实呼吸帧时不叠加程序化位移, 避免双重抖动
@@ -695,7 +717,7 @@ class DesktopPet(FrameMixin, QWidget):
         if self.mode != "free":
             return
         if (self._sleeping() or self._jumping or self._petting
-                or self._doing_action()
+                or self._doing_action() or self._throwing
                 or self.power_saver or not self.anim_enabled):
             self._schedule_walk(30, 60)
             return
@@ -1129,9 +1151,12 @@ class DesktopPet(FrameMixin, QWidget):
     def mousePressEvent(self, event):
         self._touch()
         if event.button() == Qt.LeftButton:
+            if self._throwing:
+                self._cancel_throw()      # 飞行中抓住: 取消抛掷, 回到拖拽
             self._drag_off = event.globalPos() - self.frameGeometry().topLeft()
             self._press_pos = event.globalPos()
             self._dragging = False
+            self._throw_samples = []      # 新一次拖动, 速度从头算
         elif event.button() == Qt.RightButton:
             self._show_menu(event.globalPos())
         super().mousePressEvent(event)
@@ -1150,6 +1175,12 @@ class DesktopPet(FrameMixin, QWidget):
                     self.update()
                 self._dragging = True
             self.move(self._clamp_pos(event.globalPos() - self._drag_off))
+            # 记录最近约 120ms 的指针位置, 松手时算拖拽速度(抛掷用)
+            now = time.monotonic()
+            self._throw_samples.append((now, event.globalPos().x(),
+                                        event.globalPos().y()))
+            cutoff = now - 0.12
+            self._throw_samples = [s for s in self._throw_samples if s[0] >= cutoff]
             self.bubble.follow(self.pos(), self.size(), self._content_top())
         super().mouseMoveEvent(event)
 
@@ -1163,6 +1194,8 @@ class DesktopPet(FrameMixin, QWidget):
                 self.update()
             if not self._dragging:
                 self._on_click()
+            elif self._try_throw():
+                pass                            # 抛起来了: 落地后再贴边 + 保存位置
             else:
                 self._snap_to_edge()
                 self._save_pos()
@@ -1486,7 +1519,7 @@ class DesktopPet(FrameMixin, QWidget):
         """喂零食: 张嘴/闭嘴两帧循环 rounds 轮, 约 0.7 秒后回待机。"""
         if not self.pix_eat:
             return
-        if self._doing_action():           # 正在伸懒腰/打哈欠时不抢着吃
+        if self._doing_action() or self._throwing:   # 正在伸懒腰/打哈欠/抛掷时不抢着吃
             return
         self._eating = True
         self._eat_index = 0
@@ -1540,6 +1573,7 @@ class DesktopPet(FrameMixin, QWidget):
             return False
         if (self._eating or self._doing_action() or self._sleeping()
                 or self._jumping or self._petting or self._holding or self._dragging
+                or self._throwing
                 or not self.anim_enabled or self.power_saver or self.state != "idle"):
             return False
         self._action_kind = kind
@@ -1589,7 +1623,7 @@ class DesktopPet(FrameMixin, QWidget):
         """
         if (self.state != "idle" or self._eating or self._doing_action()
                 or self._petting or self._holding or self._dragging
-                or self._pending_sleep):
+                or self._throwing or self._pending_sleep):
             return
         if not self.anim_enabled or self.power_saver:
             return
@@ -1623,6 +1657,117 @@ class DesktopPet(FrameMixin, QWidget):
             self._stop_walk()
         self._start_yawn()
 
+    # ------------------------------------------------------------- 抛掷: 抛物线
+    def _try_throw(self) -> bool:
+        """松手时试抛: 速度够快、动画开着、没锁定时沿抛物线飞出去。
+
+        速度从拖动最后约 100ms 的指针记录算; 抛物线规划在
+        phase1.plan_throw 里(纯函数), 保证落回起抛点同一高度且全程
+        不出屏幕。返回 False 表示没抛成, 调用方走松手老行为。
+        """
+        if not self.anim_enabled or self.power_saver or self.locked:
+            return False
+        if (self._eating or self._doing_action() or self._sleeping()
+                or self._jumping or self._petting or self._throwing):
+            return False
+        vx, vy = drag_velocity(self._throw_samples)
+        area = self._screen().availableGeometry()
+        plan = plan_throw(self.x(), self.y(), self.width(), self.height(),
+                          vx, vy, (area.left(), area.top(),
+                                   area.right(), area.bottom()))
+        if plan is None:
+            return False
+        if self.state == "walk":
+            self._stop_walk()
+        self._throwing = True
+        self._throw_phase = "fly"
+        self._throw_plan = plan
+        self._throw_t = 0.0
+        self._throw_index = 0
+        self._relayout()
+        self._rebuild_mask()
+        self.update()
+        self._throw_timer.start(FRAME_MS)
+        return True
+
+    def _on_throw_tick(self):
+        """抛掷推进: 每 FRAME_MS 一次, 按 t 算抛物线位置并切帧。
+
+        飞行: x/y 按 plan 的抛物线走, 飞行帧约每 THROW_MS 换一帧(翻滚感);
+        到点后精确落到落点, 换落地帧 LAND_MS, 再换晕乎帧 DIZZY_MS,
+        播完回待机。只推状态不直接画: _on_frame 每 33ms 比对帧名, 变了
+        就重建 mask 并重绘。
+        """
+        try:
+            if not self._throwing or self._throw_plan is None:
+                self._throw_timer.stop()
+                return
+            plan = self._throw_plan
+            self._throw_t += FRAME_MS / 1000.0
+            if self._throw_phase == "fly":
+                if self._throw_t >= plan["duration"]:
+                    # 落到精确落点(与起抛点同一高度), 换落地帧
+                    self.move(int(round(plan["x_land"])), int(round(plan["y0"])))
+                    self._throw_phase = "land"
+                    self._throw_t = 0.0
+                    self._relayout()
+                    self._rebuild_mask()
+                    self.update()
+                    return
+                x, y = throw_pos(plan["x0"], plan["y0"], plan["vx"],
+                                 plan["vy"], self._throw_t)
+                self.move(int(round(x)), int(round(y)))
+                pool_len = max(1, len(self.pix_throw))
+                self._throw_index = int(self._throw_t * 1000 // THROW_MS) % pool_len
+                self._relayout()
+                self._rebuild_mask()
+                self.update()
+                self.bubble.follow(self.pos(), self.size(), self._content_top())
+            elif self._throw_phase == "land":
+                if self._throw_t * 1000 >= LAND_MS:
+                    self._throw_phase = "dizzy"
+                    self._throw_t = 0.0
+                    self._say(self._pick(LINES_DIZZY), category="drag")
+                    self._relayout()
+                    self._rebuild_mask()
+                    self.update()
+            elif self._throw_phase == "dizzy":
+                if self._throw_t * 1000 >= DIZZY_MS:
+                    self._end_throw()
+        except Exception:
+            self._log_error("throw")
+
+    def _cancel_throw(self):
+        """飞行中被抓住: 取消抛掷, 不贴边、不保存, 交给接下来的拖拽。"""
+        timer = getattr(self, "_throw_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._throwing = False
+        self._throw_phase = None
+        self._throw_plan = None
+        self._throw_t = 0.0
+        self._throw_index = 0
+        self._relayout()
+        self._rebuild_mask()
+        self.update()
+
+    def _end_throw(self):
+        """抛掷收尾(晕乎播完 / 关动画 / 重置): 停定时器、清状态,
+        像正常松手一样贴边 + 保存位置。"""
+        timer = getattr(self, "_throw_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._throwing = False
+        self._throw_phase = None
+        self._throw_plan = None
+        self._throw_t = 0.0
+        self._throw_index = 0
+        self._snap_to_edge()
+        self._save_pos()
+        self._relayout()
+        self._rebuild_mask()
+        self.update()
+
     def _toggle_on_top(self, checked: bool):
         self.always_on_top = checked
         self.window_layer = "top" if checked else "normal"
@@ -1650,6 +1795,7 @@ class DesktopPet(FrameMixin, QWidget):
         self._petting = False
         self._pet_timer.stop()
         self._stop_action()
+        self._end_throw()              # 飞到一半也被重置掉, 别落到奇怪的位置
         self._pending_sleep = False        # 睡前哈欠做到一半也被重置掉, 别 1.2 秒后突然睡着
         self._set_state("idle")
         self.opacity = 1.0
@@ -1780,7 +1926,7 @@ class DesktopPet(FrameMixin, QWidget):
         for timer in (self._frame_timer, self._walk_timer, self._logic_timer,
                       self._idle_talk, self._next_walk, self._water_timer,
                       self._pet_timer, self._eat_timer, self._action_timer,
-                      self._breath_timer, self._weather_timer):
+                      self._breath_timer, self._throw_timer, self._weather_timer):
             timer.stop()
         self._unregister_hotkeys()
         if getattr(self, "_shake_timer", None) is not None:   # 抖动是懒建的, 可能还没建
