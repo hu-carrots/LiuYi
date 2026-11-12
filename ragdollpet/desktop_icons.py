@@ -271,8 +271,9 @@ class IconLayoutBackup:
 
         先持久化剩余记录，再替换内存状态；写入失败时保留原备份。
         """
+        failed_names = set(names)
         remaining = {name: pos for name, pos in self._items.items()
-                     if name in set(names)}
+                     if name in failed_names}
         if remaining == self._items:
             return True
         tmp = self.path + ".tmp"
