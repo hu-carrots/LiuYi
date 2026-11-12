@@ -252,6 +252,31 @@ class IconBackupTests(unittest.TestCase):
         self.assertEqual(bak2.get("Chrome"), (300, 400))
         self.assertEqual(len(bak2), 2)
 
+    def test_retain_only_failed_restores_across_restart(self):
+        bak = IconLayoutBackup(self.path)
+        bak.record("ok", (100, 200))
+        bak.record("failed", (300, 400))
+        self.assertTrue(bak.retain(["failed"]))
+        self.assertEqual(bak.items(), [("failed", (300, 400))])
+        self.assertEqual(IconLayoutBackup(self.path).items(),
+                         [("failed", (300, 400))])
+
+    def test_retain_write_failure_preserves_original(self):
+        bak = IconLayoutBackup(self.path)
+        bak.record("ok", (100, 200))
+        bak.record("failed", (300, 400))
+        with mock.patch.object(os, "replace", side_effect=OSError("disk full")):
+            self.assertFalse(bak.retain(["failed"]))
+        self.assertEqual(len(bak), 2)
+        self.assertEqual(len(IconLayoutBackup(self.path)), 2)
+
+    def test_retain_empty_removes_backup(self):
+        bak = IconLayoutBackup(self.path)
+        bak.record("ok", (100, 200))
+        self.assertTrue(bak.retain([]))
+        self.assertFalse(bak)
+        self.assertFalse(os.path.exists(self.path))
+
     def test_clear_removes_memory_and_file(self):
         bak = IconLayoutBackup(self.path)
         bak.record("报告.docx", (100, 200))
