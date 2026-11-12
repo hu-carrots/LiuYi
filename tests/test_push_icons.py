@@ -476,23 +476,25 @@ class PushIconsGuiTests(unittest.TestCase):
         self.assertFalse(self.pet._doing_action())
 
     def _drive_walk_to_arrival(self, limit=2000):
-        """手动推走路定时器, 直到扒拉动作开始(或到上限)。"""
+        """手动推走路定时器, 直到新动作开始(推帧 kind="push" 或扒拉 kind="paw")。"""
         for _ in range(limit):
-            if self.pet._action_kind == "paw":
+            if self.pet._doing_action():
                 return True
             if self.pet.state != "walk":
                 return False
             self.pet._on_walk_tick()
-        return self.pet._action_kind == "paw"
+        return self.pet._doing_action()
 
-    def test_real_mode_walk_paw_push(self):
-        """完整流程: 走过去 → 扒拉 → 图标挪约 32px → 备份记了原始位置。"""
+    def test_real_mode_walk_push_frames(self):
+        """完整流程: 走过去 → 推帧(4 帧) → 图标挪约 32px → 备份记了原始位置。"""
         self.assertTrue(self.pet._start_paw())
         self.assertEqual(self.pet.state, "walk")
         self.assertIsNotNone(self.pet._walk_target_x)
         self.assertTrue(self._drive_walk_to_arrival())
         self.assertEqual(self.pet.state, "idle")
-        self.assertEqual(self.pet._action_kind, "paw")
+        self.assertEqual(self.pet._action_kind, "push")
+        self.assertEqual(self.pet._action_left, 4)
+        self.assertTrue(self.pet._frame()[0].startswith("push"))
         self._drive_action_to_end()
         new_pos = self.fake.get_position("报告.docx")
         self.assertIsNotNone(new_pos)

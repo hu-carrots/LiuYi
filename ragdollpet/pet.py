@@ -75,7 +75,7 @@ from .config import (
     IMG_BLINK, IMG_CLICK, IMG_DIZZY, IMG_IDLE, IMG_IDLE_BREATH, IMG_LAND,
     IMG_PET, IMG_SLEEP, IMG_SLEEP_BREATH, IMG_STRETCH, IMG_THROW,
     IMG_WALK_LEGACY, IMG_WALK_SEQ, IMG_YAWN, INSTANCE_TITLE,
-    BREATH_MS, DIZZY_MS, EAT_MS, IMG_EAT, IMG_HOLD, IMG_PAW, JUMP_HEIGHT,
+    BREATH_MS, DIZZY_MS, EAT_MS, IMG_EAT, IMG_HOLD, IMG_PAW, IMG_PUSH, JUMP_HEIGHT,
     LAND_MS, LINES_ANGRY, LINES_BACK, LINES_CLICK, LINES_COMFORT,
     LINES_DIZZY, LINES_DRAG, LINES_FEED, LINES_IDLE, LINES_LAUNCH,
     LINES_PRAISE, LINES_SLEEP, LINES_STRETCH, LINES_TEASE, LINES_YAWN,
@@ -306,7 +306,10 @@ class DesktopPet(FrameMixin, QWidget):
         self.pix_paw = [pm for pm in (self._load_image(n) for n in IMG_PAW)
                         if pm is not None and not pm.isNull()]
         self.pix_paw_l = [p for p in (self._flipped(pm) for pm in self.pix_paw) if p]
-        self._action_kind = None       # None / "stretch" / "yawn" / "paw": 当前在做哪个新动作
+        self.pix_push = [pm for pm in (self._load_image(n) for n in IMG_PUSH)
+                         if pm is not None and not pm.isNull()]
+        self.pix_push_l = [p for p in (self._flipped(pm) for pm in self.pix_push) if p]
+        self._action_kind = None       # None / "stretch" / "yawn" / "paw" / "push": 当前在做哪个新动作
         self._action_index = 0
         self._action_left = 0
         self._last_action_at = time.monotonic()   # 上次新动作开始时间(待机随机触发的节流用)
@@ -1700,7 +1703,7 @@ class DesktopPet(FrameMixin, QWidget):
         on_done 是播完后的回调(推图标用); 动作中途被停掉时不调。
         """
         pool = {"stretch": self.pix_stretch, "yawn": self.pix_yawn,
-                "paw": self.pix_paw}.get(kind) or []
+                "paw": self.pix_paw, "push": self.pix_push}.get(kind) or []
         if not pool:
             return False
         if (self._eating or self._doing_action() or self._sleeping()
@@ -1760,10 +1763,15 @@ class DesktopPet(FrameMixin, QWidget):
         return self._start_walk_to_icon(icon, self._on_icon_arrived)
 
     def _on_icon_arrived(self, icon):
-        """走到图标旁: 开始扒拉, 播完推图标一把。"""
+        """走到图标旁: 开始推图标, 播完推一把。
+
+        推帧缺了就回落到扒拉帧播一次再推图标(on_done 照常推);
+        扒拉帧也没了, _start_action 回 False, _push_target 清掉, 不崩。
+        """
         self._push_target = dict(icon)
         lines = [template.format(name=icon["name"]) for template in LINES_PUSH]
-        if not self._start_action("paw", lines, rounds=1,
+        kind = "push" if self.pix_push else "paw"
+        if not self._start_action(kind, lines, rounds=1,
                                   on_done=self._push_icon_after_paw):
             self._push_target = None
 
