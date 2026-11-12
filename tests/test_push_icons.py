@@ -261,6 +261,14 @@ class IconBackupTests(unittest.TestCase):
         self.assertEqual(IconLayoutBackup(self.path).items(),
                          [("failed", (300, 400))])
 
+    def test_retain_accepts_one_shot_iterable(self):
+        bak = IconLayoutBackup(self.path)
+        bak.record("failed-a", (10, 20))
+        bak.record("failed-b", (30, 40))
+        bak.record("restored", (50, 60))
+        self.assertTrue(bak.retain(name for name in ("failed-a", "failed-b")))
+        self.assertEqual(set(dict(bak.items())), {"failed-a", "failed-b"})
+
     def test_retain_write_failure_preserves_original(self):
         bak = IconLayoutBackup(self.path)
         bak.record("ok", (100, 200))
