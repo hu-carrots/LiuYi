@@ -85,7 +85,7 @@ class FrameMixin:
 
     def _frame(self):
         """当前应绘制的帧: (名字, QPixmap|None)。
-        优先级: 被拎起 > 跳跃/炸毛 > 吃东西 > 伸懒腰/打哈欠 > 被摸 > 睡觉(含呼吸帧) > 走路 > 闭眼 > 待机(含呼吸帧)。
+        优先级: 被拎起 > 抛掷(飞/落地/晕乎) > 跳跃/炸毛 > 吃东西 > 伸懒腰/打哈欠 > 被摸 > 睡觉(含呼吸帧) > 走路 > 闭眼 > 待机(含呼吸帧)。
         呼吸循环下标 0 是基础帧, 名字保持 "idle"/"sleep" 不变, 只有吸气/呼气才带 breath 后缀 ——
         这样图缺了、动画关了, 帧名和原来一模一样, 老测试和 mask 缓存都不受影响。"""
         # 拖动中: 整只猫被拎起来, 优先级最高
@@ -93,6 +93,32 @@ class FrameMixin:
             if self.facing < 0 and self.pix_hold_l is not None:
                 return "hold_l", self.pix_hold_l
             return "hold", self.pix_hold
+        # 抛掷: 飞行两帧交替翻滚 -> 落地一帧 -> 晕乎一帧; 放在被拎起之下、
+        # 跳跃/吃东西/新动作/被摸/睡觉/走路/眨眼/待机之上, 飞行时什么都不抢。
+        # 图缺了就往下走, 用被拎起/待机帧顶上, 继续飞也不崩。
+        if getattr(self, "_throwing", False):
+            phase = getattr(self, "_throw_phase", None)
+            if phase == "fly":
+                plan = getattr(self, "_throw_plan", None) or {}
+                if plan.get("vx", 0) < 0 and getattr(self, "pix_throw_l", None):
+                    pool, suffix = self.pix_throw_l, "_l"
+                else:
+                    pool, suffix = getattr(self, "pix_throw", None) or [], ""
+                if pool:
+                    idx = getattr(self, "_throw_index", 0) % len(pool)
+                    return (f"throw{suffix}_{idx}", pool[idx])
+                if self.pix_hold is not None:
+                    return "hold", self.pix_hold
+            elif phase == "land":
+                if self.facing < 0 and getattr(self, "pix_land_l", None) is not None:
+                    return "land_l", self.pix_land_l
+                if getattr(self, "pix_land", None) is not None:
+                    return "land", self.pix_land
+            elif phase == "dizzy":
+                if self.facing < 0 and getattr(self, "pix_dizzy_l", None) is not None:
+                    return "dizzy_l", self.pix_dizzy_l
+                if getattr(self, "pix_dizzy", None) is not None:
+                    return "dizzy", self.pix_dizzy
         if (self._jumping or time.monotonic() < self._angry_until) and self.pix_click is not None:
             return "click", self.pix_click
         # 喂零食: 张嘴/闭嘴两帧循环

@@ -124,15 +124,118 @@ def next_breath_index(index, pool_len) -> int:
 
 
 def should_advance_breath(state, anim_enabled, power_saver, eating,
-                          doing_action, petting, holding, jumping) -> bool:
+                          doing_action, petting, holding, jumping,
+                          throwing=False) -> bool:
     """呼吸帧该不该推进: 只在待机/睡觉且什么都没做、动画开着时才推进。"""
     if state not in ("idle", "sleep", "deep_sleep"):
         return False
     if not anim_enabled or power_saver:
         return False
-    if eating or doing_action or petting or holding or jumping:
+    if eating or doing_action or petting or holding or jumping or throwing:
         return False
     return True
+
+
+# ================================ 抛掷: 抛物线 ================================
+# 拖拽松手时速度够快就把猫抛出去: 沿抛物线飞, 落回与起抛点同一高度,
+# 全程不出屏幕。规划函数放这里(纯函数, 可单元测试); 飞行推进在 pet.py
+# 的 _on_throw_tick 里按 FRAME_MS 步进。
+THROW_MIN_SPEED = 500        # 松手速度超过这个值(px/s)才抛
+THROW_GRAVITY = 2400         # 重力加速度(px/s²), 画面 y 向下为正
+THROW_MIN_UP_VY = -300       # 垂直分量不够向上时, 给这个向上的初速度(px/s)
+THROW_MARGIN = 8             # 落点/顶点离屏幕边缘留的余量(px)
+
+
+def drag_velocity(samples, window_ms=100):
+    """最近 window_ms 内的拖拽速度 (vx, vy) px/s。
+
+    samples 是 [(t 秒, x, y), ...] 的指针位置记录(单调时间)。
+    样本不足两点、时间跨度太小(<20ms)或输入非法时回 (0.0, 0.0)。
+    """
+    try:
+        pts = [(float(t), float(x), float(y)) for t, x, y in samples]
+    except (TypeError, ValueError):
+        return (0.0, 0.0)
+    if len(pts) < 2:
+        return (0.0, 0.0)
+    t_end = pts[-1][0]
+    recent = [p for p in pts if (t_end - p[0]) * 1000.0 <= window_ms]
+    if len(recent) < 2:
+        recent = pts[-2:]
+    dt = recent[-1][0] - recent[0][0]
+    if dt < 0.02:
+        return (0.0, 0.0)
+    vx = (recent[-1][1] - recent[0][1]) / dt
+    vy = (recent[-1][2] - recent[0][2]) / dt
+    return (vx, vy)
+
+
+def throw_pos(x0, y0, vx, vy, t, g=THROW_GRAVITY):
+    """抛物线上的位置: x = x0 + vx*t, y = y0 + vy*t + 0.5*g*t²。"""
+    try:
+        x0, y0, vx, vy, t, g = (float(v) for v in (x0, y0, vx, vy, t, g))
+    except (TypeError, ValueError):
+        return (0.0, 0.0)
+    return (x0 + vx * t, y0 + vy * t + 0.5 * g * t * t)
+
+
+def plan_throw(x0, y0, w, h, vx, vy, area, margin=THROW_MARGIN):
+    """规划一次抛掷, 返回 dict 或 None(不该抛)。
+
+    area 是 (left, top, right, bottom) 可用区域; 窗口 w×h, 起点为左上角。
+    保证三件事, 缺一不可(少一个就回 None, 走松手老行为):
+      1. 落点与起点同一高度: 落点 y == y0(飞行时间 T = -2*vy/g);
+      2. 落点不出屏幕: x 落点在 [left+margin, right-w-margin] 内,
+         超出就等比缩小 vx;
+      3. 顶点不出屏幕: 顶点 y >= top+margin, 冲出就减小 |vy|(重算 T)。
+    x(t) 在起点和落点之间单调, y(t) 在顶点和 y0 之间, 所以三点都在
+    屏幕内 => 全程都在屏幕内。
+    """
+    try:
+        x0, y0, w, h = float(x0), float(y0), float(w), float(h)
+        vx, vy = float(vx), float(vy)
+        left, top, right, bottom = (float(v) for v in area)
+        margin = float(margin)
+        g = float(THROW_GRAVITY)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0 or g <= 0:
+        return None
+    # 速度不够: 不抛
+    speed = (vx * vx + vy * vy) ** 0.5
+    if speed < THROW_MIN_SPEED:
+        return None
+    # 垂直分量不够向上(下抛/平抛): 给一个向上的小初速度, 保证先上抛再落回 y0
+    if vy > THROW_MIN_UP_VY:
+        vy = THROW_MIN_UP_VY
+    # 顶点: apex_y = y0 - vy²/(2g), 必须留在 top+margin 之下(屏幕内);
+    # 起点离顶边太近、连一个小上抛都装不下时, 不抛。
+    top_limit = top + margin
+    if y0 <= top_limit:
+        return None
+    apex_y = y0 - vy * vy / (2 * g)
+    if apex_y < top_limit:
+        vy = -((2 * g * (y0 - top_limit)) ** 0.5)
+        apex_y = top_limit
+    duration = -2 * vy / g
+    if duration <= 0:
+        return None
+    # 落点: x 落点夹在屏幕内, 超出就等比缩小 vx(方向不变)
+    x_land = x0 + vx * duration
+    x_min = left + margin
+    x_max = right - w - margin
+    if x_max < x_min:      # 窗口比可用区域还宽: 退回硬边界
+        x_min, x_max = left, right - w
+    if x_land < x_min or x_land > x_max:
+        if x_land == x0:
+            return None
+        scale = (min(max(x_land, x_min), x_max) - x0) / (x_land - x0)
+        if scale <= 0:
+            return None
+        vx *= scale
+        x_land = x0 + vx * duration
+    return {"vx": vx, "vy": vy, "duration": duration,
+            "x0": x0, "y0": y0, "x_land": x_land, "apex_y": apex_y}
 
 
 # ================================ 模式 / 窗口 ================================

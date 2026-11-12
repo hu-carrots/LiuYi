@@ -182,8 +182,8 @@ class NewActionCodeStructureTests(unittest.TestCase):
                       "self._jumping", "self._petting", "self.power_saver",
                       "not self.anim_enabled"):
             self.assertIn(guard, start[:2000], guard)
-        # 吃东西和走路也被新动作拦住
-        self.assertIn("if self._doing_action():           # 正在伸懒腰/打哈欠时不抢着吃",
+        # 吃东西和走路也被新动作拦住; 抛掷时同样不抢着吃(守卫加了 _throwing)
+        self.assertIn("if self._doing_action() or self._throwing:   # 正在伸懒腰/打哈欠/抛掷时不抢着吃",
                       src)
         # 睡前哈欠约 1.2 秒后才真正睡; 关动画/重置/退出时停定时器
         self.assertIn("QTimer.singleShot(1200, self._finish_pending_sleep)", src)
