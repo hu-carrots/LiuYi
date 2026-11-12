@@ -266,6 +266,32 @@ class IconLayoutBackup:
         return bool(self._items)
 
 
+    def retain(self, names):
+        """仅保留恢复失败的条目，避免失败时丢失原始位置。
+
+        先持久化剩余记录，再替换内存状态；写入失败时保留原备份。
+        """
+        remaining = {name: pos for name, pos in self._items.items()
+                     if name in set(names)}
+        if remaining == self._items:
+            return True
+        tmp = self.path + ".tmp"
+        try:
+            if remaining:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({k: [v[0], v[1]] for k, v in remaining.items()},
+                              f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
+            else:
+                os.remove(self.path)
+        except FileNotFoundError:
+            if remaining:
+                return False
+        except OSError:
+            return False
+        self._items = remaining
+        return True
+
     def clear(self):
         """清空备份: 内存和文件一起清(恢复完调用)。"""
         self._items = {}
@@ -284,7 +310,7 @@ from ctypes import wintypes
 
 
 class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+    _fields_ = [("x", ctypes.c_int32), ("y", ctypes.c_int32)]
 
 
 class _LVITEMW(ctypes.Structure):
